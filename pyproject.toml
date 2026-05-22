@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codemapy"
+version = "0.1.0"
+description = "A human-readable code map generator for local projects."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Codemap contributors" }]
+dependencies = []
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.6"]
+
+[project.scripts]
+codemapy = "codemapy.cli:main"
+codemapy-gui = "codemapy.gui:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
