@@ -6,24 +6,213 @@ from pathlib import Path
 
 
 DEFAULT_IGNORES = {
+    ".coverage",
     ".git",
+    ".codemapy",
     ".hg",
+    ".cargo",
+    ".DS_Store",
+    ".env",
+    ".gradle",
+    ".next",
+    ".nuxt",
     ".svn",
     ".codemap",
+    ".grammar-build",
+    ".idea",
     ".mypy_cache",
     ".pytest_cache",
     ".ruff_cache",
+    ".svelte-kit",
     ".tox",
     ".venv",
+    ".vscode",
+    ".vite",
     "__pycache__",
     "build",
+    "CMakeFiles",
     "codemapy-report.html",
+    "coverage",
+    "db",
+    "DerivedData",
+    "Debug",
     "dist",
+    "grammars",
     "htmlcov",
+    "incremental_db",
+    "netlist",
     "node_modules",
+    "Pods",
+    "Release",
+    "simulation",
+    "synthesis",
     "target",
+    "vendor",
     "venv",
+    "Win32",
+    "work",
+    "x64",
 }
+
+DEFAULT_IGNORE_DIR_PREFIXES = (
+    "cmake-build-",
+    "impl",
+)
+
+DEFAULT_IGNORE_DIR_SUFFIXES = (
+    ".egg-info",
+)
+
+PROJECT_METADATA_FILES = {
+    ".eslintrc",
+    ".eslintrc.cjs",
+    ".eslintrc.js",
+    ".eslintrc.json",
+    ".eslintrc.yaml",
+    ".eslintrc.yml",
+    ".prettierrc",
+    ".prettierrc.json",
+    "bun.lock",
+    "bun.lockb",
+    "Cargo.lock",
+    "Cargo.toml",
+    "CMakeCache.txt",
+    "CMakeLists.txt",
+    "CMakePresets.json",
+    "CMakeUserPresets.json",
+    "compile_commands.json",
+    "composer.lock",
+    "constraints.txt",
+    "deno.lock",
+    "flake.lock",
+    "Gemfile.lock",
+    "GNUmakefile",
+    "go.sum",
+    "gradle.lockfile",
+    "jsconfig.json",
+    "makefile",
+    "Makefile",
+    "mix.lock",
+    "mypy.ini",
+    "package-lock.json",
+    "package.json",
+    "packages.lock.json",
+    "Package.resolved",
+    "Pipfile.lock",
+    "pnpm-lock.yaml",
+    "poetry.lock",
+    "postcss.config.cjs",
+    "postcss.config.js",
+    "postcss.config.mjs",
+    "postcss.config.ts",
+    "pubspec.lock",
+    "pyproject.toml",
+    "pytest.ini",
+    "requirements-dev.txt",
+    "requirements.txt",
+    "rollup.config.js",
+    "rollup.config.mjs",
+    "rollup.config.ts",
+    "setup.cfg",
+    "setup.py",
+    "svelte.config.js",
+    "svelte.config.ts",
+    "tailwind.config.cjs",
+    "tailwind.config.js",
+    "tailwind.config.mjs",
+    "tailwind.config.ts",
+    "tox.ini",
+    "tsconfig.json",
+    "tsconfig.node.json",
+    "uv.lock",
+    "vite.config.js",
+    "vite.config.mjs",
+    "vite.config.ts",
+    "vitest.config.js",
+    "vitest.config.mjs",
+    "vitest.config.ts",
+    "webpack.config.cjs",
+    "webpack.config.js",
+    "webpack.config.mjs",
+    "webpack.config.ts",
+    "yarn.lock",
+}
+
+PROJECT_METADATA_SUFFIXES = (
+    ".qpf",
+    ".qsf",
+    ".sdc",
+    ".sln",
+    ".vcxproj",
+    ".vcxproj.filters",
+    ".vcxproj.user",
+    ".xdc",
+    ".xpr",
+)
+
+GENERATED_FILE_EXTENSIONS = {
+    ".a",
+    ".bit",
+    ".dll",
+    ".dylib",
+    ".elf",
+    ".exe",
+    ".fst",
+    ".hex",
+    ".jed",
+    ".lib",
+    ".log",
+    ".map",
+    ".o",
+    ".obj",
+    ".pof",
+    ".pyc",
+    ".pyo",
+    ".rpt",
+    ".sdf",
+    ".so",
+    ".sof",
+    ".vcd",
+    ".wlf",
+}
+
+GENERATED_FILE_SUFFIXES = (
+    ".css.map",
+    ".js.map",
+    ".min.js",
+    "_prim.v",
+)
+
+_DEFAULT_IGNORES_LOWER = {item.lower() for item in DEFAULT_IGNORES}
+_PROJECT_METADATA_FILES_LOWER = {item.lower() for item in PROJECT_METADATA_FILES}
+_PROJECT_METADATA_SUFFIXES_LOWER = tuple(suffix.lower() for suffix in PROJECT_METADATA_SUFFIXES)
+_GENERATED_FILE_EXTENSIONS_LOWER = {suffix.lower() for suffix in GENERATED_FILE_EXTENSIONS}
+_GENERATED_FILE_SUFFIXES_LOWER = tuple(suffix.lower() for suffix in GENERATED_FILE_SUFFIXES)
+
+
+def is_default_ignored_dir_name(name: str) -> bool:
+    normalized = name.lower()
+    return (
+        normalized in _DEFAULT_IGNORES_LOWER
+        or any(normalized.startswith(prefix.lower()) for prefix in DEFAULT_IGNORE_DIR_PREFIXES)
+        or any(normalized.endswith(suffix.lower()) for suffix in DEFAULT_IGNORE_DIR_SUFFIXES)
+    )
+
+
+def is_project_metadata_file(path: Path) -> bool:
+    name = path.name
+    normalized = name.lower()
+    return normalized in _PROJECT_METADATA_FILES_LOWER or any(
+        normalized.endswith(suffix) for suffix in _PROJECT_METADATA_SUFFIXES_LOWER
+    )
+
+
+def is_generated_file(path: Path) -> bool:
+    name = path.name.lower()
+    suffix = path.suffix.lower()
+    return suffix in _GENERATED_FILE_EXTENSIONS_LOWER or any(
+        name.endswith(pattern) for pattern in _GENERATED_FILE_SUFFIXES_LOWER
+    )
 
 
 @dataclass(frozen=True)

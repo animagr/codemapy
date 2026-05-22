@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import warnings
 from pathlib import Path
 
 from codemapy.deps.base import DependencyExtractor
@@ -13,7 +14,9 @@ class PythonExtractor(DependencyExtractor):
     def extract(self, path: Path) -> tuple[ImportRef, ...]:
         try:
             source = path.read_text(encoding="utf-8", errors="ignore")
-            tree = ast.parse(source, filename=str(path))
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", SyntaxWarning)
+                tree = ast.parse(source, filename=str(path))
         except (OSError, SyntaxError):
             return ()
 

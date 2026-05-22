@@ -10,3 +10,4 @@ dist/
 coverage.out
 htmlcov/
 codemapy-report.html
+.codemapy/

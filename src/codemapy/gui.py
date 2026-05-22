@@ -5,9 +5,9 @@ import traceback
 import webbrowser
 from pathlib import Path
 
+from .artifacts import ArtifactPaths, artifact_dir_for, write_artifacts
 from .config import load_config, merge_cli_config
 from .graph import build_report
-from .render.html import write_html
 from .scanner import scan_project
 
 
@@ -20,7 +20,7 @@ def main(argv: list[str] | None = None) -> int:
 
     app = qt.QtWidgets.QApplication(argv or sys.argv)
     window = ScanWindow(qt)
-    window.resize(720, 360)
+    window.resize(720, 320)
     window.show()
     return app.exec()
 
@@ -76,15 +76,6 @@ class ScanWindow:
         root_row.addWidget(browse_button)
         layout.addLayout(root_row)
 
-        output_row = QtWidgets.QHBoxLayout()
-        self.output_edit = QtWidgets.QLineEdit()
-        self.output_edit.setPlaceholderText("Output HTML path, defaults to <directory>/codemapy-report.html")
-        output_button = QtWidgets.QPushButton("Save As")
-        output_button.clicked.connect(self.select_output)
-        output_row.addWidget(self.output_edit, stretch=1)
-        output_row.addWidget(output_button)
-        layout.addLayout(output_row)
-
         options_row = QtWidgets.QHBoxLayout()
         self.open_checkbox = QtWidgets.QCheckBox("Open report after scan")
         self.open_checkbox.setChecked(True)
@@ -116,29 +107,19 @@ class ScanWindow:
         )
         if directory:
             self.root_edit.setText(directory)
-            if not self.output_edit.text().strip():
-                self.output_edit.setText(str(Path(directory) / "codemapy-report.html"))
-
-    def select_output(self) -> None:
-        root = Path(self.root_edit.text().strip() or Path.cwd())
-        suggested = self.output_edit.text().strip() or str(root / "codemapy-report.html")
-        filename, _ = self.qt.QtWidgets.QFileDialog.getSaveFileName(
-            self.window,
-            "Save codemapy report",
-            suggested,
-            "HTML files (*.html);;All files (*)",
-        )
-        if filename:
-            self.output_edit.setText(filename)
 
     def scan(self) -> None:
         QtWidgets = self.qt.QtWidgets
-        root = Path(self.root_edit.text().strip()).expanduser()
+        root = Path(self.root_edit.text().strip()).expanduser().resolve()
         if not root.exists() or not root.is_dir():
             QtWidgets.QMessageBox.warning(self.window, "Invalid directory", f"Not a directory:\n{root}")
             return
 
-        output = Path(self.output_edit.text().strip()) if self.output_edit.text().strip() else root / "codemapy-report.html"
+        artifact_dir = artifact_dir_for(root)
+        if artifact_dir.exists() and not self.confirm_rewrite(artifact_dir):
+            self.status_label.setText(f"Artifacts unchanged: {artifact_dir}")
+            return
+
         self.scan_button.setEnabled(False)
         self.status_label.setText("Scanning...")
         QtWidgets.QApplication.setOverrideCursor(self.qt.QtCore.Qt.CursorShape.WaitCursor)
@@ -148,11 +129,11 @@ class ScanWindow:
             config = merge_cli_config(load_config(root), only=None, exclude=None)
             files = scan_project(root, config)
             report = build_report(root, files)
-            html_path = write_html(report, output)
-            self.summary.setPlainText(_summary_text(report, html_path))
-            self.status_label.setText(f"Scan complete: {html_path}")
+            artifact_paths = write_artifacts(report)
+            self.summary.setPlainText(_summary_text(report, artifact_paths))
+            self.status_label.setText(f"Artifacts written: {artifact_paths.directory}")
             if self.open_checkbox.isChecked():
-                webbrowser.open(html_path.as_uri())
+                webbrowser.open(artifact_paths.report.as_uri())
         except Exception as exc:
             self.status_label.setText("Scan failed.")
             self.summary.setPlainText(traceback.format_exc())
@@ -161,9 +142,26 @@ class ScanWindow:
             QtWidgets.QApplication.restoreOverrideCursor()
             self.scan_button.setEnabled(True)
 
-def _summary_text(report, html_path: Path) -> str:
+    def confirm_rewrite(self, artifact_dir: Path) -> bool:
+        QtWidgets = self.qt.QtWidgets
+        answer = QtWidgets.QMessageBox.question(
+            self.window,
+            "Rewrite .codemapy artifacts?",
+            (
+                f"{artifact_dir} already exists.\n\n"
+                "Rewrite .codemapy artifacts against the current codebase?"
+            ),
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+        return answer == QtWidgets.QMessageBox.StandardButton.Yes
+
+
+def _summary_text(report, artifact_paths: ArtifactPaths) -> str:
     lines = [
-        f"Report: {html_path}",
+        f"Artifacts: {artifact_paths.directory}",
+        f"Report: {artifact_paths.report}",
+        f"Context: {artifact_paths.context}",
         f"Root: {report.root}",
         f"Files: {len(report.files)}",
         f"Lines of code: {report.total_loc}",

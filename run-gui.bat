@@ -1,4 +1,4 @@
 @echo off
 setlocal
 set PYTHONPATH=%~dp0src
-python -m codemapy.gui %*
+py -3 -m codemapy.gui %*

@@ -5,6 +5,7 @@ import json
 import webbrowser
 from pathlib import Path
 
+from .artifacts import ArtifactPaths, artifact_dir_for, report_payload, write_artifacts
 from .config import load_config, merge_cli_config
 from .graph import build_report
 from .render.html import write_html
@@ -16,6 +17,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Generate a human-readable code map for a local project.")
     parser.add_argument("path", nargs="?", default=".", help="Project path to scan.")
     parser.add_argument("--html", metavar="PATH", help="Write a single-file HTML report.")
+    parser.add_argument("--artifacts", action="store_true", help="Write .codemapy agent artifacts.")
+    parser.add_argument("--yes", action="store_true", help="Overwrite existing .codemapy artifacts without prompting.")
     parser.add_argument("--open", action="store_true", help="Open the HTML report after writing it.")
     parser.add_argument("--json", action="store_true", help="Print report data as JSON.")
     parser.add_argument("--only", help="Comma-separated extensions to include, such as py,js,ts.")
@@ -35,9 +38,20 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(render_tree(report))
 
-    if args.html or args.open:
-        output = Path(args.html) if args.html else root / "codemapy-report.html"
-        html_path = write_html(report, output)
+    artifact_paths: ArtifactPaths | None = None
+    if args.artifacts or (args.open and not args.html):
+        artifact_dir = artifact_dir_for(root)
+        if artifact_dir.exists() and not args.yes and not _confirm_rewrite(artifact_dir):
+            print(f"\nArtifacts unchanged: {artifact_dir}")
+        else:
+            artifact_paths = write_artifacts(report)
+            print(f"\nArtifacts: {artifact_paths.directory}")
+
+    if args.html or (args.open and artifact_paths):
+        if args.html:
+            html_path = write_html(report, Path(args.html))
+        elif artifact_paths:
+            html_path = artifact_paths.report
         print(f"\nHTML report: {html_path}")
         if args.open:
             webbrowser.open(html_path.as_uri())
@@ -46,22 +60,16 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _report_json(report) -> str:
-    payload = {
-        "root": str(report.root),
-        "files": [file.__dict__ | {"absolute_path": str(file.absolute_path)} for file in report.files],
-        "modules": [
-            {
-                "path": module.path,
-                "language": module.language,
-                "loc": module.loc,
-                "size": module.size,
-                "fan_in": module.fan_in,
-                "fan_out": module.fan_out,
-                "imports": [ref.__dict__ for ref in module.imports],
-            }
-            for module in report.modules
-        ],
-        "edges": [edge.__dict__ for edge in report.edges],
-        "external_imports": [item.__dict__ for item in report.external_imports],
-    }
-    return json.dumps(payload, indent=2, sort_keys=True)
+    return json.dumps(report_payload(report), indent=2, sort_keys=True)
+
+
+def _confirm_rewrite(artifact_dir: Path) -> bool:
+    prompt = (
+        f"{artifact_dir} already exists. "
+        "Rewrite .codemapy artifacts against the current codebase? [y/N] "
+    )
+    try:
+        answer = input(prompt)
+    except EOFError:
+        return False
+    return answer.strip().lower() in {"y", "yes"}
