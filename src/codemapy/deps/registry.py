@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from codemapy.deps.base import DependencyExtractor
 from codemapy.deps.c import CExtractor
+from codemapy.deps.gdscript import GDScriptExtractor
 from codemapy.deps.javascript import JavaScriptExtractor
+from codemapy.deps.lua import LuaExtractor
 from codemapy.deps.python import PythonExtractor
 from codemapy.deps.rust import RustExtractor
 from codemapy.deps.verilog import VerilogExtractor
@@ -11,6 +13,8 @@ from codemapy.deps.verilog import VerilogExtractor
 _c = CExtractor()
 _python = PythonExtractor()
 _javascript = JavaScriptExtractor()
+_gdscript = GDScriptExtractor()
+_lua = LuaExtractor()
 _rust = RustExtractor()
 _verilog = VerilogExtractor()
 
@@ -29,6 +33,8 @@ EXTRACTORS_BY_EXT: dict[str, DependencyExtractor] = {
     ".ts": _javascript,
     ".tsx": _javascript,
     ".svelte": _javascript,
+    ".gd": _gdscript,
+    ".lua": _lua,
     ".rs": _rust,
     ".v": _verilog,
     ".vh": _verilog,

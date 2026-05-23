@@ -40,6 +40,7 @@ LANGUAGES_BY_EXT = {
     ".scala": "Scala",
     ".ex": "Elixir",
     ".exs": "Elixir",
+    ".gd": "GDScript",
     ".sol": "Solidity",
     ".sh": "Shell",
     ".bash": "Shell",

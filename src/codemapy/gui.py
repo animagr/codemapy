@@ -5,6 +5,10 @@ import traceback
 import webbrowser
 from pathlib import Path
 
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    __package__ = "codemapy"
+
 from .artifacts import ArtifactPaths, artifact_dir_for, write_artifacts
 from .config import load_config, merge_cli_config
 from .graph import build_report

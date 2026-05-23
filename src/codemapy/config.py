@@ -8,6 +8,7 @@ from pathlib import Path
 DEFAULT_IGNORES = {
     ".coverage",
     ".git",
+    ".godot",
     ".codemapy",
     ".hg",
     ".cargo",
@@ -101,6 +102,7 @@ PROJECT_METADATA_FILES = {
     "Pipfile.lock",
     "pnpm-lock.yaml",
     "poetry.lock",
+    "project.godot",
     "postcss.config.cjs",
     "postcss.config.js",
     "postcss.config.mjs",
@@ -177,6 +179,8 @@ GENERATED_FILE_EXTENSIONS = {
 }
 
 GENERATED_FILE_SUFFIXES = (
+    ".gd.uid",
+    ".import",
     ".css.map",
     ".js.map",
     ".min.js",

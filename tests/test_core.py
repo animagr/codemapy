@@ -173,6 +173,108 @@ class CoreTests(unittest.TestCase):
             {(edge.source, edge.target) for edge in report.edges},
         )
 
+    def test_resolves_javascript_current_directory_imports(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "main.ts").write_text("import { helper } from '.';\n", encoding="utf-8")
+            (root / "index.ts").write_text("export const helper = 1;\n", encoding="utf-8")
+
+            report = build_report(root, scan_project(root, Config()))
+
+        self.assertIn(("main.ts", "index.ts"), {(edge.source, edge.target) for edge in report.edges})
+
+    def test_scans_gdscript_and_resolves_godot_resource_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            game = root / "game"
+            src = game / "src"
+            src.mkdir(parents=True)
+            (game / "project.godot").write_text("config_version=5\n", encoding="utf-8")
+            (src / "actor.gd").write_text(
+                "extends Node\n"
+                "const Job = preload(\"res://src/job.gd\")\n",
+                encoding="utf-8",
+            )
+            (src / "job.gd").write_text("class_name Job\nextends RefCounted\n", encoding="utf-8")
+
+            files = scan_project(root, Config())
+            report = build_report(root, files)
+
+        languages = {file.path: file.language for file in files}
+        self.assertEqual("GDScript", languages["game/src/actor.gd"])
+        self.assertIn(
+            ("game/src/actor.gd", "game/src/job.gd"),
+            {(edge.source, edge.target) for edge in report.edges},
+        )
+
+    def test_resolves_gdscript_class_name_extends(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "base.gd").write_text("class_name BaseJob\nextends RefCounted\n", encoding="utf-8")
+            (root / "child.gd").write_text("extends BaseJob\n", encoding="utf-8")
+
+            report = build_report(root, scan_project(root, Config()))
+
+        self.assertIn(("child.gd", "base.gd"), {(edge.source, edge.target) for edge in report.edges})
+
+    def test_resolves_lua_require_imports(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pkg = root / "pkg"
+            pkg.mkdir()
+            (root / "main.lua").write_text('local helper = require("pkg.helper")\n', encoding="utf-8")
+            (pkg / "helper.lua").write_text("return {}\n", encoding="utf-8")
+
+            report = build_report(root, scan_project(root, Config()))
+
+        self.assertIn(("main.lua", "pkg/helper.lua"), {(edge.source, edge.target) for edge in report.edges})
+
+    def test_resolves_luanti_modpath_dofile_imports(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mod = root / "mods" / "dmobs"
+            mobs = mod / "mobs"
+            mobs.mkdir(parents=True)
+            (mod / "mod.conf").write_text("name = dmobs\n", encoding="utf-8")
+            (mod / "init.lua").write_text(
+                'local dpath = core.get_modpath("dmobs") .. "/"\n'
+                'dofile(dpath .. "mobs/pig.lua")\n',
+                encoding="utf-8",
+            )
+            (mobs / "pig.lua").write_text("return {}\n", encoding="utf-8")
+
+            report = build_report(root, scan_project(root, Config()))
+
+        self.assertIn(
+            ("mods/dmobs/init.lua", "mods/dmobs/mobs/pig.lua"),
+            {(edge.source, edge.target) for edge in report.edges},
+        )
+
+    def test_resolves_luanti_current_modname_dofile_imports(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "mod.conf").write_text("name = mobs_fish\n", encoding="utf-8")
+            (root / "init.lua").write_text(
+                'local MP = core.get_modpath(core.get_current_modname()) .. "/"\n'
+                'dofile(MP .. "spawn.lua")\n',
+                encoding="utf-8",
+            )
+            (root / "spawn.lua").write_text("return {}\n", encoding="utf-8")
+
+            report = build_report(root, scan_project(root, Config()))
+
+        self.assertIn(("init.lua", "spawn.lua"), {(edge.source, edge.target) for edge in report.edges})
+
+    def test_lua_directory_file_import_does_not_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "main.lua").write_text('dofile(".")\n', encoding="utf-8")
+            (root / "init.lua").write_text("return {}\n", encoding="utf-8")
+
+            report = build_report(root, scan_project(root, Config()))
+
+        self.assertIn(("main.lua", "init.lua"), {(edge.source, edge.target) for edge in report.edges})
+
     def test_resolves_typescript_source_from_javascript_import_suffix(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
