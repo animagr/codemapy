@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from codemapy.config import is_default_ignored_dir_name, is_project_metadata_file
-from codemapy.models import ModuleNode, Report
+from codemapy.models import ModuleNode, Report, Symbol
 from codemapy.render.html import write_html
 
 
@@ -21,6 +21,7 @@ class ArtifactPaths:
     context: Path
     summary: Path
     hubs: Path
+    symbols: Path
     manifest: Path
 
 
@@ -46,12 +47,14 @@ def write_artifacts(report: Report, output_dir: Path | None = None) -> ArtifactP
         context=directory / "context.json",
         summary=directory / "summary.md",
         hubs=directory / "hubs.json",
+        symbols=directory / "symbols.json",
         manifest=directory / "manifest.json",
     )
 
     write_html(report, paths.report)
     paths.context.write_text(_json_dumps(report_payload(report, generated_at)), encoding="utf-8")
     paths.hubs.write_text(_json_dumps(hubs_payload(report)), encoding="utf-8")
+    paths.symbols.write_text(_json_dumps(symbols_payload(report)), encoding="utf-8")
     paths.summary.write_text(summary_markdown(report, generated_at), encoding="utf-8")
     paths.manifest.write_text(_json_dumps(manifest_payload(report, paths, generated_at)), encoding="utf-8")
     return paths
@@ -70,6 +73,8 @@ def report_payload(report: Report, generated_at: str | None = None) -> dict[str,
             "size": report.total_size,
             "internal_dependencies": len(report.edges),
             "external_references": len(report.external_imports),
+            "symbols": sum(_symbol_count(module.symbols) for module in report.modules),
+            "cycles": len(report.cycles),
             "languages": report.languages,
         },
         "files": [
@@ -96,6 +101,9 @@ def report_payload(report: Report, generated_at: str | None = None) -> dict[str,
                     {"raw": ref.raw, "kind": ref.kind, "line": ref.line}
                     for ref in module.imports
                 ],
+                # Full symbol detail lives in symbols.json to avoid duplicating it
+                # here (which doubled artifact size on large repos).
+                "symbol_count": _symbol_count(module.symbols),
             }
             for module in report.modules
         ],
@@ -107,8 +115,62 @@ def report_payload(report: Report, generated_at: str | None = None) -> dict[str,
             {"source": item.source, "raw": item.raw, "kind": item.kind}
             for item in report.external_imports
         ],
+        "cycles": [list(cycle) for cycle in report.cycles],
         "warnings": list(report.warnings),
     }
+
+
+def symbols_payload(report: Report) -> dict[str, object]:
+    """A symbol-centric view: per-file definitions plus a flat name index.
+
+    The ``index`` maps each defined name to every place it is defined, so an
+    agent can answer "where is X defined?" without scanning the whole tree.
+    """
+    by_file = {
+        module.path: [_symbol_payload(symbol) for symbol in module.symbols]
+        for module in report.modules
+        if module.symbols
+    }
+
+    index: dict[str, list[dict[str, object]]] = {}
+    for module in report.modules:
+        for symbol in module.symbols:
+            for qualified, node in symbol.flatten():
+                index.setdefault(node.name, []).append(
+                    {
+                        "path": module.path,
+                        "qualified_name": qualified,
+                        "kind": node.kind,
+                        "line": node.start_line,
+                    }
+                )
+
+    return {
+        "version": ARTIFACT_VERSION,
+        "total_symbols": sum(_symbol_count(module.symbols) for module in report.modules),
+        "files": dict(sorted(by_file.items())),
+        "index": dict(sorted(index.items())),
+    }
+
+
+def _symbol_payload(symbol: Symbol) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "name": symbol.name,
+        "kind": symbol.kind,
+        "start_line": symbol.start_line,
+        "end_line": symbol.end_line,
+    }
+    if symbol.signature:
+        payload["signature"] = symbol.signature
+    if symbol.doc:
+        payload["doc"] = symbol.doc
+    if symbol.children:
+        payload["children"] = [_symbol_payload(child) for child in symbol.children]
+    return payload
+
+
+def _symbol_count(symbols: tuple[Symbol, ...]) -> int:
+    return sum(1 + _symbol_count(symbol.children) for symbol in symbols)
 
 
 def hubs_payload(report: Report) -> dict[str, object]:
@@ -144,6 +206,7 @@ def manifest_payload(report: Report, paths: ArtifactPaths, generated_at: str) ->
             "context": paths.context.name,
             "summary": paths.summary.name,
             "hubs": paths.hubs.name,
+            "symbols": paths.symbols.name,
             "manifest": paths.manifest.name,
         },
         "counts": {
@@ -152,10 +215,39 @@ def manifest_payload(report: Report, paths: ArtifactPaths, generated_at: str) ->
             "loc": report.total_loc,
             "internal_dependencies": len(report.edges),
             "external_references": len(report.external_imports),
+            "symbols": sum(_symbol_count(module.symbols) for module in report.modules),
+            "cycles": len(report.cycles),
         },
         "metadata_files": metadata_files,
         "languages": report.languages,
+        "artifact_bytes": _artifact_sizes(paths),
+        "notes": artifact_notes(paths),
     }
+
+
+LARGE_ARTIFACT_BYTES = 5 * 1024 * 1024  # 5 MB
+
+
+def _artifact_sizes(paths: ArtifactPaths) -> dict[str, int]:
+    sizes: dict[str, int] = {}
+    for path in (paths.report, paths.context, paths.summary, paths.hubs, paths.symbols):
+        try:
+            sizes[path.name] = path.stat().st_size
+        except OSError:
+            continue
+    return sizes
+
+
+def artifact_notes(paths: ArtifactPaths) -> list[str]:
+    notes: list[str] = []
+    sizes = _artifact_sizes(paths)
+    large = sorted(name for name, size in sizes.items() if size > LARGE_ARTIFACT_BYTES)
+    if large:
+        notes.append(
+            "Large artifacts (" + ", ".join(large) + "). For agent context prefer "
+            "summary.md, hubs.json, and the symbols.json `index` over loading the full files."
+        )
+    return notes
 
 
 def summary_markdown(report: Report, generated_at: str | None = None) -> str:
@@ -168,6 +260,8 @@ def summary_markdown(report: Report, generated_at: str | None = None) -> str:
         f"- LOC: {report.total_loc}",
         f"- Internal dependencies: {len(report.edges)}",
         f"- External references: {len(report.external_imports)}",
+        f"- Symbols: {sum(_symbol_count(module.symbols) for module in report.modules)}",
+        f"- Dependency cycles: {len(report.cycles)}",
         "",
         "## Languages",
         "",
@@ -187,6 +281,22 @@ def summary_markdown(report: Report, generated_at: str | None = None) -> str:
         )
     else:
         lines.append("- No internal dependency edges detected")
+
+    lines.extend(["", "## Dependency Cycles", ""])
+    if report.cycles:
+        for cycle in report.cycles[:20]:
+            lines.append(_format_cycle(cycle))
+        if len(report.cycles) > 20:
+            lines.append(f"- ... and {len(report.cycles) - 20} more")
+    else:
+        lines.append("- None detected")
+
+    lines.extend(["", "## Symbols by Kind", ""])
+    kind_counts = _symbol_kind_counts(report)
+    if kind_counts:
+        lines.extend(f"- {kind}: {count}" for kind, count in kind_counts)
+    else:
+        lines.append("- None detected")
 
     lines.extend(["", "## External References", ""])
     external_counts = _external_reference_counts(report)
@@ -213,6 +323,45 @@ def _ranked_modules(report: Report) -> list[ModuleNode]:
         report.modules,
         key=lambda module: (-module.fan_in, -module.fan_out, -module.loc, module.path),
     )
+
+
+LARGE_CYCLE_THRESHOLD = 8
+
+
+def _format_cycle(cycle: tuple[str, ...]) -> str:
+    if len(cycle) == 1:
+        return f"- self-import: `{cycle[0]}`"
+    if len(cycle) <= LARGE_CYCLE_THRESHOLD:
+        return f"- {len(cycle)} files: " + " <-> ".join(f"`{path}`" for path in cycle)
+
+    # Summarise large cycles: which directories, and a few example members.
+    directories = sorted({_dir_of(path) for path in cycle})
+    dir_text = ", ".join(f"`{directory}`" for directory in directories[:5])
+    if len(directories) > 5:
+        dir_text += f", +{len(directories) - 5} more"
+    examples = ", ".join(f"`{path}`" for path in cycle[:4])
+    return (
+        f"- {len(cycle)} files across {dir_text} "
+        f"(large dependency cycle; may stem from a re-export/barrel hub); e.g. {examples}, ..."
+    )
+
+
+def _dir_of(path: str) -> str:
+    head, _, _ = path.rpartition("/")
+    return head or "."
+
+
+def _symbol_kind_counts(report: Report) -> list[tuple[str, int]]:
+    counts: dict[str, int] = {}
+
+    def tally(symbols: tuple[Symbol, ...]) -> None:
+        for symbol in symbols:
+            counts[symbol.kind] = counts.get(symbol.kind, 0) + 1
+            tally(symbol.children)
+
+    for module in report.modules:
+        tally(module.symbols)
+    return sorted(counts.items(), key=lambda item: (-item[1], item[0]))
 
 
 def _external_reference_counts(report: Report) -> list[tuple[str, int]]:

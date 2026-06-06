@@ -120,11 +120,14 @@ class ImportResolver:
 
         candidates = [(base / include_path).as_posix() for base in bases]
         direct_match = self._first_existing(candidates)
-        if direct_match:
+        if direct_match and direct_match != source.path:
             return direct_match
 
         basename_matches = [
-            path for path in self.paths if path.lower().endswith(f"/{raw.lower()}") or path.lower() == raw.lower()
+            path
+            for path in self.paths
+            if path != source.path
+            and (path.lower().endswith(f"/{raw.lower()}") or path.lower() == raw.lower())
         ]
         if basename_matches:
             return sorted(basename_matches, key=lambda path: _c_include_rank(source.path, path))[0]

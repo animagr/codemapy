@@ -5,7 +5,7 @@ import json
 import webbrowser
 from pathlib import Path
 
-from .artifacts import ArtifactPaths, artifact_dir_for, report_payload, write_artifacts
+from .artifacts import ArtifactPaths, artifact_dir_for, artifact_notes, report_payload, write_artifacts
 from .config import load_config, merge_cli_config
 from .graph import build_report
 from .render.html import write_html
@@ -46,6 +46,8 @@ def main(argv: list[str] | None = None) -> int:
         else:
             artifact_paths = write_artifacts(report)
             print(f"\nArtifacts: {artifact_paths.directory}")
+            for note in artifact_notes(artifact_paths):
+                print(f"Note: {note}")
 
     if args.html or (args.open and artifact_paths):
         if args.html:

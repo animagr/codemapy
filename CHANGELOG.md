@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-06-06
+
+### Added
+
+- Added a tree-sitter backend (`tree-sitter` + `tree-sitter-language-pack`) for precise parsing, enabled by default as declared runtime dependencies. It degrades gracefully: when unavailable, extraction falls back to the regex/`ast` paths.
+- Added symbol-level extraction. Each scanned file now records the functions, classes, methods, and other definitions it contains (with line spans, and — for Python — full signatures and docstrings). Python uses `ast`; the other tree-sitter-covered languages (JavaScript, TypeScript, Go, Rust, Java, Ruby, C, C++, Lua, Bash) use the language pack.
+- Added a `symbols.json` artifact: per-file definitions plus a flat name index (`name -> [{path, qualified_name, kind, line}]`) so an agent can answer "where is X defined?" without scanning the whole tree.
+- Added circular-dependency detection (Tarjan's strongly-connected-components algorithm). Cycles are reported in `context.json`, `manifest.json`, and a new "Dependency Cycles" section in `summary.md`.
+- Added a "Symbols by Kind" overview and symbol/cycle counts to `summary.md` and the artifact manifest.
+
+### Changed
+
+- JavaScript/TypeScript and C/C++ import extraction now use tree-sitter when available, fixing multi-line imports and comment edge cases that the regex extractors mishandled. The regex extractors remain as fallbacks.
+- Fan-in/fan-out now counts distinct neighbouring files, so importing the same target on multiple lines no longer inflates the score.
+- Symbol extraction for non-Python languages now uses dedicated tree-sitter definition queries instead of the language pack's high-level structure output, which returned no names for C/C++ and omitted methods/modules for Ruby.
+- Cycle detection now ignores declaration/containment edges (e.g. Rust `mod`), which previously merged most of a Rust crate into one giant false cycle.
+- `summary.md` now summarises large dependency cycles (directories + a few examples) instead of listing every member inline.
+- `context.json` no longer duplicates full symbol detail (kept only in `symbols.json`); it records a `symbol_count` per module instead, roughly halving the file on large repos.
+- `run-gui.bat` now installs the tree-sitter backend on first launch if it is missing, so the GUI uses it without a separate setup step.
+
+### Fixed
+
+- `manifest.json` now reports each artifact's byte size and adds a note for large artifacts, pointing agents to `summary.md`, `hubs.json`, and the `symbols.json` index instead of loading multi-megabyte files.
+- Fixed C/C++ system includes (e.g. `#include <endian.h>`) resolving to the including file itself, which produced a spurious self-import cycle.
+
 ## [0.1.2] - 2026-05-22
 
 ### Added

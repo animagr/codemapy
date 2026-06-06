@@ -7,12 +7,16 @@ from codemapy.deps.javascript import JavaScriptExtractor
 from codemapy.deps.lua import LuaExtractor
 from codemapy.deps.python import PythonExtractor
 from codemapy.deps.rust import RustExtractor
+from codemapy.deps.treesitter import TreeSitterCExtractor, TreeSitterJsExtractor
 from codemapy.deps.verilog import VerilogExtractor
 
 
-_c = CExtractor()
+_c_regex = CExtractor()
+_javascript_regex = JavaScriptExtractor()
+
+_c = TreeSitterCExtractor(fallback=_c_regex)
+_javascript = TreeSitterJsExtractor(fallback=_javascript_regex)
 _python = PythonExtractor()
-_javascript = JavaScriptExtractor()
 _gdscript = GDScriptExtractor()
 _lua = LuaExtractor()
 _rust = RustExtractor()
@@ -32,7 +36,7 @@ EXTRACTORS_BY_EXT: dict[str, DependencyExtractor] = {
     ".cjs": _javascript,
     ".ts": _javascript,
     ".tsx": _javascript,
-    ".svelte": _javascript,
+    ".svelte": _javascript_regex,
     ".gd": _gdscript,
     ".lua": _lua,
     ".rs": _rust,

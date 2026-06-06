@@ -22,6 +22,27 @@ class ImportRef:
 
 
 @dataclass(frozen=True)
+class Symbol:
+    """A definition found in a source file (function, class, method, ...)."""
+
+    name: str
+    kind: str
+    start_line: int
+    end_line: int
+    signature: str | None = None
+    doc: str | None = None
+    children: tuple["Symbol", ...] = ()
+
+    def flatten(self, prefix: str = "") -> "list[tuple[str, Symbol]]":
+        """Yield ``(qualified_name, symbol)`` pairs for self and descendants."""
+        qualified = f"{prefix}.{self.name}" if prefix else self.name
+        pairs: list[tuple[str, Symbol]] = [(qualified, self)]
+        for child in self.children:
+            pairs.extend(child.flatten(qualified))
+        return pairs
+
+
+@dataclass(frozen=True)
 class ModuleNode:
     path: str
     language: str
@@ -30,6 +51,7 @@ class ModuleNode:
     imports: tuple[ImportRef, ...] = ()
     fan_in: int = 0
     fan_out: int = 0
+    symbols: tuple[Symbol, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -55,6 +77,7 @@ class Report:
     edges: tuple[Edge, ...]
     external_imports: tuple[ExternalImport, ...] = ()
     warnings: tuple[str, ...] = ()
+    cycles: tuple[tuple[str, ...], ...] = ()
 
     @property
     def name(self) -> str:
