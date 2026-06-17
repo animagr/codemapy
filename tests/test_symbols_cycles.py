@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from codemapy.artifacts import report_payload, summary_markdown, symbols_payload, write_artifacts
@@ -90,6 +91,60 @@ class FanCountTests(unittest.TestCase):
             )
         b = next(m for m in report.modules if m.path == "pkg/b.py")
         self.assertEqual(b.fan_in, 1)
+
+
+class CSharpDependencyTests(unittest.TestCase):
+    def test_using_resolves_to_namespace_files_and_externals(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, report = _report(
+                tmp,
+                {
+                    "Core/Engine.cs": "namespace App.Core {\n  public class Engine { }\n}\n",
+                    "Core/Loader.cs": "namespace App.Core {\n  public class Loader { }\n}\n",
+                    "Ui/Window.cs": (
+                        "using System;\n"
+                        "using App.Core;\n"
+                        "namespace App.Ui {\n  public class Window { }\n}\n"
+                    ),
+                },
+            )
+        edges = {(e.source, e.target) for e in report.edges}
+        # `using App.Core;` fans out to every file declaring that namespace.
+        self.assertIn(("Ui/Window.cs", "Core/Engine.cs"), edges)
+        self.assertIn(("Ui/Window.cs", "Core/Loader.cs"), edges)
+        # `using System;` matches no internal namespace -> external reference.
+        externals = {(e.source, e.raw) for e in report.external_imports}
+        self.assertIn(("Ui/Window.cs", "System"), externals)
+
+    def test_file_scoped_namespace_and_no_self_edge(self) -> None:
+        # File-scoped namespace syntax, and a file importing its own namespace
+        # must not produce a self-edge.
+        with tempfile.TemporaryDirectory() as tmp:
+            _, report = _report(
+                tmp,
+                {
+                    "A.cs": "using App.Core;\nnamespace App.Core;\npublic class A { }\n",
+                    "B.cs": "namespace App.Core;\npublic class B { }\n",
+                },
+            )
+        edges = {(e.source, e.target) for e in report.edges}
+        self.assertNotIn(("A.cs", "A.cs"), edges)
+        self.assertIn(("A.cs", "B.cs"), edges)
+
+    def test_broad_namespace_fanout_is_capped(self) -> None:
+        # A `using` whose namespace resolves to more files than the cap is
+        # dropped (and recorded as external) rather than fanning out.
+        from codemapy.deps import resolver as resolver_mod
+
+        files = {f"god/F{i}.cs": "namespace Root {\n}\n" for i in range(3)}
+        files["client/Client.cs"] = "using Root;\nnamespace Client {\n}\n"
+        with unittest.mock.patch.object(resolver_mod, "CSHARP_NAMESPACE_FANOUT_CAP", 2):
+            with tempfile.TemporaryDirectory() as tmp:
+                _, report = _report(tmp, files)
+        client_edges = [e for e in report.edges if e.source == "client/Client.cs"]
+        self.assertEqual(client_edges, [])
+        externals = {(e.source, e.raw) for e in report.external_imports}
+        self.assertIn(("client/Client.cs", "Root"), externals)
 
 
 class PythonSymbolTests(unittest.TestCase):
@@ -211,6 +266,37 @@ class TreeSitterImportTests(unittest.TestCase):
         kinds = {(s.name, s.kind) for s in module.symbols}
         self.assertIn(("add", "function"), kinds)
         self.assertIn(("Pt", "struct"), kinds)
+
+    def test_csharp_symbols_include_types_and_members(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, report = _report(
+                tmp,
+                {
+                    "Widget.cs": (
+                        "namespace DwarfCorp.Tools {\n"
+                        "    public interface IThing { void Do(); }\n"
+                        "    public class Widget : IThing {\n"
+                        "        public Widget(int x) { }\n"
+                        "        public void Do() { }\n"
+                        "    }\n"
+                        "    public struct Point { public int X; }\n"
+                        "    public enum Color { Red, Green }\n"
+                        "    public record Money(decimal Amount);\n"
+                        "    public delegate void Handler(object s);\n"
+                        "}\n"
+                    ),
+                },
+            )
+        module = next(m for m in report.modules if m.path == "Widget.cs")
+        kinds = {(s.name, s.kind) for s in module.symbols}
+        self.assertIn(("IThing", "interface"), kinds)
+        self.assertIn(("Widget", "class"), kinds)
+        self.assertIn(("Widget", "method"), kinds)  # constructor
+        self.assertIn(("Do", "method"), kinds)
+        self.assertIn(("Point", "struct"), kinds)
+        self.assertIn(("Color", "enum"), kinds)
+        self.assertIn(("Money", "record"), kinds)
+        self.assertIn(("Handler", "delegate"), kinds)
 
     def test_ruby_symbols_include_methods_and_modules(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

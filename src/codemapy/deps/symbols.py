@@ -80,6 +80,16 @@ _SYMBOL_QUERIES: dict[str, str] = {
         (method_declaration name: (identifier) @name) @def.method
         (constructor_declaration name: (identifier) @name) @def.method
     """,
+    "csharp": """
+        (class_declaration name: (identifier) @name) @def.class
+        (interface_declaration name: (identifier) @name) @def.interface
+        (struct_declaration name: (identifier) @name) @def.struct
+        (record_declaration name: (identifier) @name) @def.record
+        (enum_declaration name: (identifier) @name) @def.enum
+        (delegate_declaration name: (identifier) @name) @def.delegate
+        (method_declaration name: (identifier) @name) @def.method
+        (constructor_declaration name: (identifier) @name) @def.method
+    """,
     "ruby": """
         (method name: (identifier) @name) @def.method
         (singleton_method name: (identifier) @name) @def.method

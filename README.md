@@ -45,8 +45,8 @@ Requires Python 3.11+.
 
 `codemapy` supports three levels of language handling:
 
-- **Dependency graph support** (imports resolved to internal edges): Python (`.py`), JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`), TypeScript (`.ts`, `.tsx`), Svelte (`.svelte`), GDScript (`.gd`), Lua (`.lua`), Rust (`.rs`), C/C++ includes (`.c`, `.h`, `.cc`, `.cpp`, `.cxx`, `.hpp`), and basic Verilog/SystemVerilog (`.v`, `.vh`, `.sv`, `.svh`)
-- **Symbol extraction** (functions, classes, methods, structs, etc. recorded in `symbols.json`, counted per file in `context.json`): Python (`ast`, with signatures and docstrings), and via tree-sitter — JavaScript, TypeScript, Go, Rust, Java, Ruby, C, C++, Lua, and Bash/shell scripts
+- **Dependency graph support** (imports resolved to internal edges): Python (`.py`), JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`), TypeScript (`.ts`, `.tsx`), Svelte (`.svelte`), GDScript (`.gd`), Lua (`.lua`), Rust (`.rs`), C# (`.cs`, via `using`/namespace resolution), C/C++ includes (`.c`, `.h`, `.cc`, `.cpp`, `.cxx`, `.hpp`), and basic Verilog/SystemVerilog (`.v`, `.vh`, `.sv`, `.svh`)
+- **Symbol extraction** (functions, classes, methods, structs, etc. recorded in `symbols.json`, counted per file in `context.json`): Python (`ast`, with signatures and docstrings), and via tree-sitter — JavaScript, TypeScript, Go, Rust, Java, C#, Ruby, C, C++, Lua, and Bash/shell scripts
 - **File scanning, LOC counts, tree, and treemap labels:** Python, JavaScript, TypeScript, Svelte, GDScript, Verilog, SystemVerilog, Go, Rust, Ruby, Java, C#, C, C++, Swift, Kotlin, PHP, Lua, Scala, Elixir, Solidity, and shell scripts
 
 Planned dependency graph support: Bash, Go, Java, and Ruby (these currently have symbol extraction but not import-resolved dependency edges).

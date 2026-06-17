@@ -3,10 +3,18 @@ from __future__ import annotations
 import posixpath
 from pathlib import Path
 
+from codemapy.deps.csharp import declared_namespaces
 from codemapy.deps.gdscript import declared_classes
 from codemapy.deps.verilog import declared_modules
 from codemapy.models import FileNode, ImportRef
 
+
+# A C# `using` names a namespace, which may be declared by many files. Most are
+# cohesive (tens of files), but projects often have a flat "god namespace" (e.g.
+# the root namespace declared by hundreds of files). Fanning a single `using`
+# out to that many targets produces meaningless edges and inflates hub counts,
+# so usings whose namespace resolves to more than this many files are dropped.
+CSHARP_NAMESPACE_FANOUT_CAP = 100
 
 JS_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".svelte")
 SVELTE_SCRIPT_EXTENSIONS = (".svelte.ts", ".svelte.js")
@@ -29,8 +37,20 @@ class ImportResolver:
         self.gdscript_classes = self._build_gdscript_class_index(files)
         self.godot_roots = self._build_godot_roots(files)
         self.lua_mod_roots = self._build_lua_mod_roots(files)
+        self.csharp_namespaces = self._build_csharp_namespace_index(files)
 
-    def resolve(self, source: FileNode, ref: ImportRef) -> str | None:
+    def resolve(self, source: FileNode, ref: ImportRef) -> tuple[str, ...]:
+        """Resolve *ref* to zero or more internal target files.
+
+        Most languages map an import to a single file; C# `using` directives
+        name a namespace that several files share, so resolution is many-valued.
+        """
+        if source.language == "C#":
+            return self._resolve_csharp(source, ref)
+        target = self._resolve_single(source, ref)
+        return (target,) if target else ()
+
+    def _resolve_single(self, source: FileNode, ref: ImportRef) -> str | None:
         if source.language == "Python":
             return self._resolve_python(source, ref.raw)
         if source.language in {"JavaScript", "TypeScript", "Svelte"}:
@@ -46,6 +66,16 @@ class ImportResolver:
         if source.language == "Lua":
             return self._resolve_lua(source, ref)
         return None
+
+    def _resolve_csharp(self, source: FileNode, ref: ImportRef) -> tuple[str, ...]:
+        if ref.kind != "csharp-using":
+            return ()
+        # A `using` imports the types declared *directly* in a namespace, not in
+        # its sub-namespaces, so match the namespace name exactly.
+        targets = tuple(path for path in self.csharp_namespaces.get(ref.raw, ()) if path != source.path)
+        if not targets or len(targets) > CSHARP_NAMESPACE_FANOUT_CAP:
+            return ()
+        return targets
 
     def _resolve_python(self, source: FileNode, raw: str) -> str | None:
         if raw.startswith("."):
@@ -315,6 +345,15 @@ class ImportResolver:
             for class_name in declared_classes(file.absolute_path):
                 classes.setdefault(class_name, []).append(file.path)
         return {class_name: tuple(sorted(paths)) for class_name, paths in classes.items()}
+
+    def _build_csharp_namespace_index(self, files: tuple[FileNode, ...]) -> dict[str, tuple[str, ...]]:
+        namespaces: dict[str, list[str]] = {}
+        for file in files:
+            if file.language != "C#":
+                continue
+            for namespace in declared_namespaces(file.absolute_path):
+                namespaces.setdefault(namespace, []).append(file.path)
+        return {namespace: tuple(sorted(paths)) for namespace, paths in namespaces.items()}
 
     def _build_godot_roots(self, files: tuple[FileNode, ...]) -> tuple[Path, ...]:
         roots: set[Path] = set()

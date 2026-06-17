@@ -26,9 +26,10 @@ def build_report(root: Path, files: tuple[FileNode, ...]) -> Report:
         imports = extractor.extract(file.absolute_path) if extractor else ()
         imports_by_file[file.path] = imports
         for ref in imports:
-            target = resolver.resolve(file, ref)
-            if target:
-                edges.append(Edge(source=file.path, target=target, raw=ref.raw, kind=ref.kind))
+            targets = resolver.resolve(file, ref)
+            if targets:
+                for target in targets:
+                    edges.append(Edge(source=file.path, target=target, raw=ref.raw, kind=ref.kind))
             else:
                 external.append(ExternalImport(source=file.path, raw=ref.raw, kind=ref.kind))
 

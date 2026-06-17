@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codemapy"
-version = "0.1.3"
+version = "0.1.4"
 description = "A small Python code map generator."
 readme = "README.md"
 requires-python = ">=3.11"
