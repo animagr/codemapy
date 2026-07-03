@@ -359,7 +359,9 @@ def summary_markdown(
     )
 
     if report.languages:
-        lines.extend(f"- {language}: {count} files" for language, count in report.languages.items())
+        lines.extend(
+            f"- {language}: {_count_files(count)}" for language, count in report.languages.items()
+        )
     else:
         lines.append("- None detected")
 
@@ -467,7 +469,7 @@ def _directory_overview(report: Report) -> list[str]:
     lines = []
     for key, (count, loc, languages) in ranked[:MAX_OVERVIEW_DIRS]:
         dominant = max(sorted(languages), key=lambda lang: languages[lang])
-        lines.append(f"- `{key}`: {count} files, {loc} loc ({dominant})")
+        lines.append(f"- `{key}`: {_count_files(count)}, {loc} loc ({dominant})")
     if len(ranked) > MAX_OVERVIEW_DIRS:
         lines.append(f"- ... and {len(ranked) - MAX_OVERVIEW_DIRS} more directories")
     return lines
@@ -590,7 +592,7 @@ def _asset_lines(report: Report) -> list[str]:
         return ["- None"]
     groups = sorted(report.asset_groups, key=lambda group: (-group.size, group.extension))
     lines = [
-        f"- `{group.extension}`: {group.count} files, {group.size} bytes"
+        f"- `{group.extension}`: {_count_files(group.count)}, {group.size} bytes"
         for group in groups[:MAX_ASSET_GROUPS]
     ]
     if len(groups) > MAX_ASSET_GROUPS:
@@ -629,6 +631,10 @@ def _format_cycle(cycle: tuple[str, ...]) -> str:
 def _dir_of(path: str) -> str:
     head, _, _ = path.rpartition("/")
     return head or "."
+
+
+def _count_files(count: int) -> str:
+    return f"{count} file" if count == 1 else f"{count} files"
 
 
 def _symbol_kind_counts(report: Report) -> list[tuple[str, int]]:

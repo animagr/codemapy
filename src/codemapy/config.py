@@ -94,6 +94,8 @@ PROJECT_METADATA_FILES = {
     "makefile",
     "Makefile",
     "mix.lock",
+    "mkdocs.yml",
+    "mkdocs.yaml",
     "mypy.ini",
     "package-lock.json",
     "package.json",
@@ -141,10 +143,15 @@ PROJECT_METADATA_FILES = {
 }
 
 PROJECT_METADATA_SUFFIXES = (
+    ".csproj",
+    ".fsproj",
+    ".props",
     ".qpf",
     ".qsf",
     ".sdc",
     ".sln",
+    ".targets",
+    ".vbproj",
     ".vcxproj",
     ".vcxproj.filters",
     ".vcxproj.user",

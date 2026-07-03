@@ -49,7 +49,7 @@ Requires Python 3.11+.
 
 `codemapy` supports three levels of language handling:
 
-- **Dependency graph support** (imports resolved to internal edges): Python (`.py`), JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`), TypeScript (`.ts`, `.tsx`), Svelte (`.svelte`), GDScript (`.gd`), Lua (`.lua`), Rust (`.rs`), C# (`.cs`, via `using`/namespace resolution), C/C++ includes (`.c`, `.h`, `.cc`, `.cpp`, `.cxx`, `.hpp`), and basic Verilog/SystemVerilog (`.v`, `.vh`, `.sv`, `.svh`)
+- **Dependency graph support** (imports resolved to internal edges): Python (`.py`), JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`), TypeScript (`.ts`, `.tsx`), Svelte (`.svelte`), GDScript (`.gd`), Lua (`.lua`), Rust (`.rs`), C# (`.cs`, via `using`/namespace resolution filtered by referenced type names), C/C++ includes (`.c`, `.h`, `.cc`, `.cpp`, `.cxx`, `.hpp`), and basic Verilog/SystemVerilog (`.v`, `.vh`, `.sv`, `.svh`)
 - **Symbol extraction** (functions, classes, methods, structs, etc. recorded in `symbols.json`, counted per file in `context.json`): Python (`ast`, with signatures and docstrings), and via tree-sitter — JavaScript, TypeScript, Go, Rust, Java, C#, Ruby, C, C++, Lua, and Bash/shell scripts. Definitions are nested by span, so methods carry their declaring class and the symbol index records qualified names such as `Widget.update`.
 - **File scanning, LOC counts, tree, and treemap labels:** Python, JavaScript, TypeScript, Svelte, GDScript, Verilog, SystemVerilog, Go, Rust, Ruby, Java, C#, C, C++, Swift, Kotlin, PHP, Lua, Scala, Elixir, Solidity, and shell scripts
 

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import posixpath
+import re
 from pathlib import Path
 
-from codemapy.deps.csharp import declared_namespaces
+from codemapy.deps.csharp import declared_namespaces, declared_types
 from codemapy.deps.gdscript import declared_classes
 from codemapy.deps.verilog import declared_modules
 from codemapy.models import FileNode, ImportRef
@@ -13,8 +14,13 @@ from codemapy.models import FileNode, ImportRef
 # cohesive (tens of files), but projects often have a flat "god namespace" (e.g.
 # the root namespace declared by hundreds of files). Fanning a single `using`
 # out to that many targets produces meaningless edges and inflates hub counts,
-# so usings whose namespace resolves to more than this many files are dropped.
+# so usings whose namespace resolves to more than a cap are dropped. The cap is
+# relative to project size (a 38-file namespace in a 100-file mod is just as
+# god-like as a 300-file namespace in a large solution), bounded below so small
+# cohesive projects keep their edges and above by this absolute limit.
 CSHARP_NAMESPACE_FANOUT_CAP = 100
+CSHARP_NAMESPACE_MIN_FANOUT_CAP = 10
+CSHARP_NAMESPACE_FANOUT_DIVISOR = 3
 
 JS_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".svelte")
 SVELTE_SCRIPT_EXTENSIONS = (".svelte.ts", ".svelte.js")
@@ -38,6 +44,8 @@ class ImportResolver:
         self.godot_roots = self._build_godot_roots(files)
         self.lua_mod_roots = self._build_lua_mod_roots(files)
         self.csharp_namespaces = self._build_csharp_namespace_index(files)
+        self.csharp_types = self._build_csharp_type_index(files)
+        self._csharp_token_cache: dict[str, frozenset[str]] = {}
 
     def resolve(self, source: FileNode, ref: ImportRef) -> tuple[str, ...]:
         """Resolve *ref* to zero or more internal target files.
@@ -71,11 +79,46 @@ class ImportResolver:
         if ref.kind != "csharp-using":
             return ()
         # A `using` imports the types declared *directly* in a namespace, not in
-        # its sub-namespaces, so match the namespace name exactly.
-        targets = tuple(path for path in self.csharp_namespaces.get(ref.raw, ()) if path != source.path)
-        if not targets or len(targets) > CSHARP_NAMESPACE_FANOUT_CAP:
+        # its sub-namespaces, so match the namespace name exactly. Within the
+        # namespace, only files whose declared types the source actually
+        # mentions count as dependencies - otherwise every `using` of a shared
+        # namespace blankets edges to all of its files and drowns real hubs.
+        candidates = tuple(path for path in self.csharp_namespaces.get(ref.raw, ()) if path != source.path)
+        if not candidates:
+            return ()
+        tokens = self._csharp_tokens(source)
+        targets = tuple(
+            path
+            for path in candidates
+            if not tokens.isdisjoint(self.csharp_types.get(path, frozenset()))
+        )
+        if not targets or len(targets) > self._csharp_fanout_cap():
             return ()
         return targets
+
+    def _csharp_fanout_cap(self) -> int:
+        csharp_files = sum(1 for file in self.files if file.language == "C#")
+        relative = max(CSHARP_NAMESPACE_MIN_FANOUT_CAP, csharp_files // CSHARP_NAMESPACE_FANOUT_DIVISOR)
+        return min(CSHARP_NAMESPACE_FANOUT_CAP, relative)
+
+    def _csharp_tokens(self, source: FileNode) -> frozenset[str]:
+        """PascalCase-ish identifiers appearing in *source*, cached per file."""
+        cached = self._csharp_token_cache.get(source.path)
+        if cached is None:
+            try:
+                text = source.absolute_path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                text = ""
+            cached = frozenset(re.findall(r"\b[A-Z][A-Za-z0-9_]*", text))
+            self._csharp_token_cache[source.path] = cached
+        return cached
+
+    def _build_csharp_type_index(self, files: tuple[FileNode, ...]) -> dict[str, frozenset[str]]:
+        return {
+            file.path: declared_types(file.absolute_path)
+            for file in files
+            if file.language == "C#"
+        }
 
     def _resolve_python(self, source: FileNode, raw: str) -> str | None:
         if raw.startswith("."):

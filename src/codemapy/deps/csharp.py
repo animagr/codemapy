@@ -19,6 +19,11 @@ USING_RE = re.compile(
 # `namespace X.Y.Z` for both block (`namespace X { ... }`) and file-scoped
 # (`namespace X;`) declarations.
 NAMESPACE_RE = re.compile(r"^\s*namespace\s+([A-Za-z_][A-Za-z0-9_.]*)", re.MULTILINE)
+# Type declarations: classes/interfaces/structs/enums (also matches the name in
+# `record class X` / `record struct X`), plain positional records, and delegates.
+TYPE_DECL_RE = re.compile(r"\b(?:class|interface|struct|enum)\s+([A-Za-z_]\w*)")
+RECORD_DECL_RE = re.compile(r"\brecord\s+(?:class\s+|struct\s+)?([A-Za-z_]\w*)")
+DELEGATE_DECL_RE = re.compile(r"\bdelegate\b[^;(=]*?([A-Za-z_]\w*)\s*\(")
 
 
 class CSharpExtractor(DependencyExtractor):
@@ -56,6 +61,23 @@ def declared_namespaces(path: Path) -> tuple[str, ...]:
         return ()
     searchable = _strip_comments(source)
     return tuple(dict.fromkeys(match.group(1) for match in NAMESPACE_RE.finditer(searchable)))
+
+
+def declared_types(path: Path) -> frozenset[str]:
+    """Return the names of the top-level-visible types declared in *path*.
+
+    Used to filter C# `using` resolution: a namespace file is only a real
+    dependency of an importer that actually references one of its types.
+    """
+    try:
+        source = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return frozenset()
+    searchable = _strip_comments(source)
+    names: set[str] = set()
+    for pattern in (TYPE_DECL_RE, RECORD_DECL_RE, DELEGATE_DECL_RE):
+        names.update(match.group(1) for match in pattern.finditer(searchable))
+    return frozenset(names)
 
 
 def _strip_comments(source: str) -> str:

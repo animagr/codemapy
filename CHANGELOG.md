@@ -32,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed a script-injection hole in `report.html`: scanned content containing `</script>` (e.g. inside an import string) could break out of the embedded data block and execute. The payload is now escaped.
 - `--open` now opens the existing `report.html` when the artifact rewrite prompt is declined, instead of silently doing nothing.
 - `requirements*.txt` variants such as `requirements-lock.txt` are now classified as dependency lockfiles instead of documentation.
+- C# `using` resolution is now filtered by referenced types: a namespace file only becomes a dependency of an importer that actually mentions one of the types it declares, instead of every `using` blanketing edges to all files sharing the namespace. On a 103-file RimWorld mod this cut internal edges from 1440 to 267, replaced a uniform fan-in-38 hub list with a real ranking, and collapsed a false 56-file "cycle" to the actual 3-file one. The fan-out cap is also relative to project size now (one third of the C# file count, bounded to 10-100).
+- `.csproj`, `.fsproj`, `.vbproj`, `.props`, `.targets`, and `mkdocs.yml` are now classified as project metadata instead of unmapped assets.
 
 ## [0.1.4] - 2026-06-17
 
