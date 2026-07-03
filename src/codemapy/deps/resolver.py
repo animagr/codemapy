@@ -42,6 +42,7 @@ class ImportResolver:
         self.rust_crate_roots = self._build_rust_crate_roots(files)
         self.gdscript_classes = self._build_gdscript_class_index(files)
         self.godot_roots = self._build_godot_roots(files)
+        self.godot_autoloads = self._build_godot_autoloads()
         self.lua_mod_roots = self._build_lua_mod_roots(files)
         self.csharp_namespaces = self._build_csharp_namespace_index(files)
         self.csharp_types = self._build_csharp_type_index(files)
@@ -274,6 +275,20 @@ class ImportResolver:
             return candidates[0] if candidates else None
         if ref.kind == "gdscript-path":
             return self._resolve_gdscript_path(source, ref.raw)
+        if ref.kind == "gdscript-ident":
+            return self._resolve_gdscript_ident(source, ref.raw)
+        return None
+
+    def _resolve_gdscript_ident(self, source: FileNode, name: str) -> str | None:
+        """Resolve a PascalCase identifier to a `class_name` file or autoload."""
+        candidates = self.gdscript_classes.get(name, ())
+        if candidates:
+            target = candidates[0]
+            return target if target != source.path else None
+        for godot_root in self._godot_roots_for_source(source):
+            res_path = self.godot_autoloads.get(godot_root, {}).get(name)
+            if res_path:
+                return self._resolve_gdscript_path(source, res_path)
         return None
 
     def _resolve_gdscript_path(self, source: FileNode, raw: str) -> str | None:
@@ -418,6 +433,15 @@ class ImportResolver:
             roots.add(Path())
         return tuple(sorted(roots, key=lambda path: path.as_posix()))
 
+    def _build_godot_autoloads(self) -> dict[Path, dict[str, str]]:
+        """Per Godot project root: autoload singleton name -> resource path."""
+        autoloads: dict[Path, dict[str, str]] = {}
+        for godot_root in self.godot_roots:
+            entries = _parse_godot_autoloads(self.root / godot_root / "project.godot")
+            if entries:
+                autoloads[godot_root] = entries
+        return autoloads
+
     def _godot_roots_for_source(self, source: FileNode) -> tuple[Path, ...]:
         source_path = Path(source.path)
         matches = [root for root in self.godot_roots if root == Path() or _path_is_relative_to(source_path, root)]
@@ -516,6 +540,33 @@ def _lua_file_candidates(paths: list[str]) -> list[str]:
                 candidates.append(path.with_suffix(".lua").as_posix())
             candidates.append((path / "init.lua").as_posix())
     return candidates
+
+
+def _parse_godot_autoloads(path: Path) -> dict[str, str]:
+    """Read the ``[autoload]`` section of a ``project.godot`` file.
+
+    Entries look like ``Global="*res://scripts/global.gd"`` - the leading
+    ``*`` marks an enabled singleton and is not part of the path.
+    """
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return {}
+
+    entries: dict[str, str] = {}
+    in_autoload = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("["):
+            in_autoload = stripped == "[autoload]"
+            continue
+        if not in_autoload or "=" not in stripped:
+            continue
+        name, _, value = stripped.partition("=")
+        resource = value.strip().strip('"').lstrip("*")
+        if name.strip() and resource:
+            entries[name.strip()] = resource
+    return entries
 
 
 def _lua_mod_conf_name(path: Path) -> str | None:

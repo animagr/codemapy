@@ -14,6 +14,12 @@ from .models import Edge, ExternalImport, FileNode, ModuleNode, Report, ScanResu
 # edges still count toward fan-in/fan-out, but are excluded from cycle analysis.
 DECLARATION_EDGE_KINDS = frozenset({"rust-mod"})
 
+# Speculative reference kinds (e.g. GDScript PascalCase identifiers that might
+# name a `class_name` class or an autoload). When they resolve they are real
+# edges; when they don't they are usually engine builtins, so they are dropped
+# instead of being recorded as external references.
+DROP_IF_UNRESOLVED_KINDS = frozenset({"gdscript-ident"})
+
 
 def build_report(root: Path, files: ScanResult | tuple[FileNode, ...]) -> Report:
     scan = files if isinstance(files, ScanResult) else ScanResult(sources=tuple(files))
@@ -27,17 +33,22 @@ def build_report(root: Path, files: ScanResult | tuple[FileNode, ...]) -> Report
     for file in files:
         extractor = extractor_for_ext(file.extension)
         imports = extractor.extract(file.absolute_path) if extractor else ()
-        imports_by_file[file.path] = imports
         # Extracting symbols right after imports lets the tree-sitter backend
         # reuse the parse tree it just built for this file.
         symbols_by_file[file.path] = extract_symbols(file)
+        kept_refs = []
         for ref in imports:
             targets = resolver.resolve(file, ref)
             if targets:
+                kept_refs.append(ref)
                 for target in targets:
                     edges.append(Edge(source=file.path, target=target, raw=ref.raw, kind=ref.kind))
+            elif ref.kind in DROP_IF_UNRESOLVED_KINDS:
+                continue
             else:
+                kept_refs.append(ref)
                 external.append(ExternalImport(source=file.path, raw=ref.raw, kind=ref.kind))
+        imports_by_file[file.path] = tuple(kept_refs)
 
     # Fan-in / fan-out count distinct neighbours, not raw edges, so a file that
     # imports the same target on several lines is not over-counted.

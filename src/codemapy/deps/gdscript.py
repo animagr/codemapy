@@ -8,7 +8,12 @@ from codemapy.models import ImportRef
 
 
 COMMENT_RE = re.compile(r"#.*")
+STRING_RE = re.compile(r"\"[^\"\n]*\"|'[^'\n]*'")
 CLASS_NAME_RE = re.compile(r"^\s*class_name\s+([A-Za-z_][A-Za-z0-9_]*)\b", re.MULTILINE)
+# PascalCase identifiers: candidate references to `class_name` classes or
+# autoload singletons. Only emitted once per distinct name; unresolved ones
+# are dropped by the graph rather than recorded as external references.
+IDENT_RE = re.compile(r"\b([A-Z][A-Za-z0-9_]*)\b")
 EXTENDS_RE = re.compile(
     r"^\s*extends\s+(?:"
     r"[\"']([^\"']+)[\"']"
@@ -103,8 +108,33 @@ class GDScriptExtractor(DependencyExtractor):
                 continue
             refs.append(ImportRef(raw=raw, kind="gdscript-path", line=_line_number(searchable, match.start())))
 
+        refs.extend(_identifier_refs(searchable, refs))
+
         unique = {(ref.raw, ref.kind, ref.line): ref for ref in refs}
         return tuple(unique.values())
+
+
+def _identifier_refs(searchable: str, existing: list[ImportRef]) -> list[ImportRef]:
+    """Candidate class/autoload references: distinct PascalCase identifiers.
+
+    Strings are stripped first so words inside text literals are not treated
+    as references. Names already captured (extends, the file's own
+    ``class_name``) are skipped to avoid duplicate edges.
+    """
+    skip = {ref.raw for ref in existing}
+    skip.update(match.group(1) for match in CLASS_NAME_RE.finditer(searchable))
+    without_strings = STRING_RE.sub("", searchable)
+    refs: list[ImportRef] = []
+    seen: set[str] = set()
+    for match in IDENT_RE.finditer(without_strings):
+        name = match.group(1)
+        if name in seen or name in skip:
+            continue
+        seen.add(name)
+        refs.append(
+            ImportRef(raw=name, kind="gdscript-ident", line=_line_number(without_strings, match.start()))
+        )
+    return refs
 
 
 def declared_classes(path: Path) -> tuple[str, ...]:

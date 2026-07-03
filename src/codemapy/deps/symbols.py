@@ -97,6 +97,13 @@ _SYMBOL_QUERIES: dict[str, str] = {
         (class name: (constant) @name) @def.class
         (module name: (constant) @name) @def.module
     """,
+    "gdscript": """
+        (class_name_statement (name) @name) @def.class
+        (class_definition name: (name) @name) @def.class
+        (function_definition name: (name) @name) @def.function
+        (signal_statement name: (name) @name) @def.signal
+        (enum_definition name: (name) @name) @def.enum
+    """,
     "lua": """
         (function_declaration
             name: [(identifier) (dot_index_expression) (method_index_expression)] @name) @def.function

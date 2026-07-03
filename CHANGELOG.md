@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.6] - 2026-07-03
+
+### Added
+
+- Added GDScript symbol extraction via the tree-sitter language pack: `.gd` files now record their `class_name` classes, inner classes, functions, signals, and enums with line spans. Pure-GDScript projects previously reported zero symbols.
+- Added GDScript dependency edges for `class_name` usage and autoload singletons: a PascalCase identifier such as `Job.new()` or `Global.score` now resolves against the project's `class_name` index and the `[autoload]` section of `project.godot` (per nested Godot project root). Identifiers that resolve to nothing (engine builtins like `Vector2`) are dropped rather than recorded as external references. Godot projects that previously showed zero internal dependencies now map their real structure (e.g. a 26-script colony sim went from 0 to 66 edges with `Cell.gd`/`Grid.gd` correctly ranked as hubs).
+
 ## [0.1.5] - 2026-07-03
 
 ### Added
@@ -116,6 +123,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Suppressed scanned-project Python `SyntaxWarning` messages during import extraction.
 - Fixed dependency graph resolution for nested include-style paths across supported languages.
 
+[0.1.6]: https://github.com/animagr/codemapy/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/animagr/codemapy/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/animagr/codemapy/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/animagr/codemapy/compare/v0.1.2...v0.1.3

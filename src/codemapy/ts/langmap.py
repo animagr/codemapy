@@ -1,9 +1,9 @@
 """Map codemapy file extensions to tree-sitter language-pack names.
 
-The grammars wired up here at time of writing are: bash, c, cpp, csharp, go,
-java, javascript, lua, python, ruby, rust, shell, tsx, typescript, verilog.
-Extensions not listed here have no tree-sitter coverage and fall back to the
-regex/``ast`` extractors.
+The grammars wired up here at time of writing are: bash, c, cpp, csharp,
+gdscript, go, java, javascript, lua, python, ruby, rust, shell, tsx,
+typescript, verilog. Extensions not listed here have no tree-sitter coverage
+and fall back to the regex/``ast`` extractors.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ PACK_NAME_BY_EXT: dict[str, str] = {
     ".cpp": "cpp",
     ".cxx": "cpp",
     ".hpp": "cpp",
+    ".gd": "gdscript",
     ".go": "go",
     ".rs": "rust",
     ".rb": "ruby",

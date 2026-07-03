@@ -161,6 +161,104 @@ class SymbolNestingTests(unittest.TestCase):
         self.assertEqual({"Widget.update", "Panel.update"}, qualified)
 
 
+class GDScriptResolutionTests(unittest.TestCase):
+    def test_class_name_usage_creates_edge_without_extends(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root,
+                {
+                    "job.gd": "class_name Job\nextends RefCounted\n",
+                    "manager.gd": (
+                        "extends Node\n"
+                        "func start() -> void:\n"
+                        "\tvar job := Job.new()\n"
+                        "\tprint(Vector2.ZERO)\n"
+                    ),
+                },
+            )
+            report = build_report(root, scan_project(root, Config()))
+
+        edges = {(e.source, e.target) for e in report.edges}
+        self.assertIn(("manager.gd", "job.gd"), edges)
+        # Unresolved engine identifiers must not flood external references.
+        externals = {e.raw for e in report.external_imports}
+        self.assertNotIn("Vector2", externals)
+
+    def test_autoload_reference_creates_edge(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root,
+                {
+                    "project.godot": (
+                        "config_version=5\n"
+                        "\n"
+                        "[autoload]\n"
+                        "\n"
+                        'Global="*res://scripts/global.gd"\n'
+                    ),
+                    "scripts/global.gd": "extends Node\nvar score := 0\n",
+                    "player.gd": (
+                        "extends Node\n"
+                        "func hit() -> void:\n"
+                        "\tGlobal.score += 1\n"
+                    ),
+                },
+            )
+            report = build_report(root, scan_project(root, Config()))
+
+        edges = {(e.source, e.target) for e in report.edges}
+        self.assertIn(("player.gd", "scripts/global.gd"), edges)
+
+
+@unittest.skipUnless(backend.AVAILABLE, "tree-sitter backend not installed")
+class GDScriptSymbolTests(unittest.TestCase):
+    def test_extracts_gdscript_definitions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root,
+                {
+                    "actor.gd": (
+                        "class_name Actor\n"
+                        "extends Node\n"
+                        "\n"
+                        "signal died(cause)\n"
+                        "\n"
+                        "enum State { IDLE, RUN }\n"
+                        "\n"
+                        "func take_damage(amount: int) -> void:\n"
+                        "\tpass\n"
+                        "\n"
+                        "class Inner:\n"
+                        "\tfunc helper() -> void:\n"
+                        "\t\tpass\n"
+                    ),
+                },
+            )
+            report = build_report(root, scan_project(root, Config()))
+
+        module = next(m for m in report.modules if m.path == "actor.gd")
+        pairs = set()
+
+        def walk(symbols) -> None:
+            for symbol in symbols:
+                pairs.add((symbol.name, symbol.kind))
+                walk(symbol.children)
+
+        walk(module.symbols)
+        self.assertIn(("Actor", "class"), pairs)
+        self.assertIn(("died", "signal"), pairs)
+        self.assertIn(("State", "enum"), pairs)
+        self.assertIn(("take_damage", "function"), pairs)
+        self.assertIn(("Inner", "class"), pairs)
+        self.assertIn(("helper", "function"), pairs)
+        # Inner's method is nested under the inner class.
+        inner = next(s for s in module.symbols if s.name == "Inner")
+        self.assertEqual(["helper"], [c.name for c in inner.children])
+
+
 class SummaryContentTests(unittest.TestCase):
     def test_summary_contains_overview_entry_points_and_guide(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
