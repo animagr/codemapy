@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import json
 import shutil
-import tomllib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from codemapy import gitinfo
 from codemapy.config import load_config
+from codemapy.entrypoints import entry_points
 from codemapy.models import AuxFile, ModuleNode, Report, Symbol
 from codemapy.render.html import write_html
 from codemapy.scanner import scan_project
@@ -436,7 +436,8 @@ def summary_markdown(
             "- `symbols.json`: per-file definitions plus an `index` mapping each defined name to its locations",
             "- `hubs.json`: modules ranked by fan-in / fan-out",
             "- `manifest.json`: generation metadata, artifact byte sizes, and `git_commit` for staleness checks",
-            "- `report.html`: visual file tree, treemap, and dependency graph for humans",
+            "- `report.html`: visual file tree, treemap, dependency graph, and insights "
+            "(entry points, hubs, cycles, per-file symbols) for humans",
         ]
     )
 
@@ -482,94 +483,15 @@ def _group_key(path: str, depth: int) -> str:
     return "/".join(parts[:depth]) + "/"
 
 
-ENTRY_POINT_BASENAMES = {
-    "__main__.py",
-    "main.py",
-    "app.py",
-    "manage.py",
-    "launcher.py",
-    "run.py",
-    "main.c",
-    "main.cpp",
-    "main.go",
-    "main.rs",
-    "main.lua",
-    "main.gd",
-    "program.cs",
-    "main.java",
-    "index.js",
-    "index.ts",
-}
-MAX_ENTRY_POINTS = 10
-MAX_ENTRY_POINT_DEPTH = 3
-
-
 def _entry_points(report: Report) -> list[str]:
-    lines: list[str] = []
-    manifests = [
-        item.path
-        for item in report.metadata_files
-        if item.path.rsplit("/", 1)[-1].lower() in {"pyproject.toml", "package.json"}
-        and len(item.path.split("/")) <= MAX_ENTRY_POINT_DEPTH
-    ]
-    manifests.sort(key=lambda path: (len(path.split("/")), path))
-    for rel in manifests:
-        prefix = f"{rel.rsplit('/', 1)[0]}/" if "/" in rel else ""
-        if rel.endswith("pyproject.toml"):
-            lines.extend(_pyproject_scripts(report.root / rel, rel))
-        else:
-            lines.extend(_package_json_entries(report.root / rel, rel, prefix))
-
-    candidates = [
-        file.path
-        for file in report.files
-        if file.path.rsplit("/", 1)[-1].lower() in ENTRY_POINT_BASENAMES
-        and len(file.path.split("/")) <= MAX_ENTRY_POINT_DEPTH
-    ]
-    candidates.sort(key=lambda path: (len(path.split("/")), path))
-    lines.extend(f"- `{path}`" for path in candidates)
-    return lines[:MAX_ENTRY_POINTS]
-
-
-def _pyproject_scripts(path: Path, rel: str) -> list[str]:
-    try:
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
-        return []
-    project = data.get("project")
-    if not isinstance(project, dict):
-        return []
     lines = []
-    for table_name in ("scripts", "gui-scripts"):
-        scripts = project.get(table_name)
-        if isinstance(scripts, dict):
-            lines.extend(
-                f"- `{name}` -> `{target}` ({rel} script)"
-                for name, target in sorted(scripts.items())
-            )
-    return lines
-
-
-def _package_json_entries(path: Path, rel: str, prefix: str) -> list[str]:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return []
-    if not isinstance(data, dict):
-        return []
-    lines = []
-    main = data.get("main")
-    if isinstance(main, str):
-        lines.append(f"- `{prefix}{main}` ({rel} main)")
-    bin_field = data.get("bin")
-    if isinstance(bin_field, str):
-        lines.append(f"- `{prefix}{bin_field}` ({rel} bin)")
-    elif isinstance(bin_field, dict):
-        lines.extend(
-            f"- `{prefix}{target}` ({rel} bin: {name})"
-            for name, target in sorted(bin_field.items())
-            if isinstance(target, str)
-        )
+    for entry in entry_points(report):
+        line = f"- `{entry.name}`"
+        if entry.target:
+            line += f" -> `{entry.target}`"
+        if entry.note:
+            line += f" ({entry.note})"
+        lines.append(line)
     return lines
 
 

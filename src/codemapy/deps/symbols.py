@@ -104,6 +104,14 @@ _SYMBOL_QUERIES: dict[str, str] = {
     "bash": """
         (function_definition name: (word) @name) @def.function
     """,
+    # The pack's verilog grammar (SystemVerilog) exposes no named fields, so
+    # names are matched structurally. Functions and tasks declared inside a
+    # module nest under it by span containment (e.g. `counter.next_value`).
+    "verilog": """
+        (module_declaration (module_header (simple_identifier) @name)) @def.module
+        (function_declaration (function_body_declaration (function_identifier) @name)) @def.function
+        (task_declaration (task_body_declaration (task_identifier) @name)) @def.task
+    """,
 }
 
 # Grammars that reuse another grammar's query.

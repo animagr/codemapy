@@ -1,9 +1,9 @@
 """Map codemapy file extensions to tree-sitter language-pack names.
 
 The grammars wired up here at time of writing are: bash, c, cpp, csharp, go,
-java, javascript, lua, python, ruby, rust, shell, tsx, typescript. Extensions
-not listed here have no tree-sitter coverage and fall back to the regex/``ast``
-extractors.
+java, javascript, lua, python, ruby, rust, shell, tsx, typescript, verilog.
+Extensions not listed here have no tree-sitter coverage and fall back to the
+regex/``ast`` extractors.
 """
 
 from __future__ import annotations
@@ -32,6 +32,13 @@ PACK_NAME_BY_EXT: dict[str, str] = {
     ".sh": "bash",
     ".bash": "bash",
     ".zsh": "bash",
+    # The pack's "verilog" grammar is the SystemVerilog grammar, which also
+    # parses plain Verilog; used for symbol extraction only (imports stay on
+    # the regex extractor in deps/verilog.py).
+    ".v": "verilog",
+    ".vh": "verilog",
+    ".sv": "verilog",
+    ".svh": "verilog",
 }
 
 

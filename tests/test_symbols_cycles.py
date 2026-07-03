@@ -364,6 +364,38 @@ class TreeSitterImportTests(unittest.TestCase):
         widget = next(s for s in module.symbols if s.name == "Widget" and s.kind == "class")
         self.assertIn(("Do", "method"), {(c.name, c.kind) for c in widget.children})
 
+    def test_verilog_symbols_modules_functions_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, report = _report(
+                tmp,
+                {
+                    "counter.v": (
+                        "module counter(input clk, output reg [7:0] count);\n"
+                        "function [7:0] next_value;\n"
+                        "    input [7:0] current;\n"
+                        "    next_value = current + 1;\n"
+                        "endfunction\n"
+                        "task reset_count;\n"
+                        "    count = 0;\n"
+                        "endtask\n"
+                        "endmodule\n"
+                        "module top(input clk);\n"
+                        "endmodule\n"
+                    ),
+                },
+            )
+        module = next(m for m in report.modules if m.path == "counter.v")
+        kinds = _flat_kinds(module.symbols)
+        self.assertIn(("counter", "module"), kinds)
+        self.assertIn(("next_value", "function"), kinds)
+        self.assertIn(("reset_count", "task"), kinds)
+        self.assertIn(("top", "module"), kinds)
+        # Functions/tasks nest under their declaring module by span containment,
+        # so the symbol index qualifies them.
+        payload = symbols_payload(report)
+        qualified = {entry["qualified_name"] for entry in payload["index"]["next_value"]}
+        self.assertEqual({"counter.next_value"}, qualified)
+
     def test_ruby_symbols_include_methods_and_modules(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _, report = _report(

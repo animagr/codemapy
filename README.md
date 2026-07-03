@@ -50,7 +50,7 @@ Requires Python 3.11+.
 `codemapy` supports three levels of language handling:
 
 - **Dependency graph support** (imports resolved to internal edges): Python (`.py`), JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`), TypeScript (`.ts`, `.tsx`), Svelte (`.svelte`), GDScript (`.gd`), Lua (`.lua`), Rust (`.rs`), C# (`.cs`, via `using`/namespace resolution filtered by referenced type names), C/C++ includes (`.c`, `.h`, `.cc`, `.cpp`, `.cxx`, `.hpp`), and basic Verilog/SystemVerilog (`.v`, `.vh`, `.sv`, `.svh`)
-- **Symbol extraction** (functions, classes, methods, structs, etc. recorded in `symbols.json`, counted per file in `context.json`): Python (`ast`, with signatures and docstrings), and via tree-sitter — JavaScript, TypeScript, Go, Rust, Java, C#, Ruby, C, C++, Lua, and Bash/shell scripts. Definitions are nested by span, so methods carry their declaring class and the symbol index records qualified names such as `Widget.update`.
+- **Symbol extraction** (functions, classes, methods, structs, etc. recorded in `symbols.json`, counted per file in `context.json`): Python (`ast`, with signatures and docstrings), and via tree-sitter — JavaScript, TypeScript, Go, Rust, Java, C#, Ruby, C, C++, Lua, Verilog/SystemVerilog (modules, functions, tasks), and Bash/shell scripts. Definitions are nested by span, so methods carry their declaring class and the symbol index records qualified names such as `Widget.update`.
 - **File scanning, LOC counts, tree, and treemap labels:** Python, JavaScript, TypeScript, Svelte, GDScript, Verilog, SystemVerilog, Go, Rust, Ruby, Java, C#, C, C++, Swift, Kotlin, PHP, Lua, Scala, Elixir, Solidity, and shell scripts
 
 Files outside these languages are not counted as source: documentation (`.md`, `.rst`, `.adoc`, `.txt`, ...) is listed separately in the artifacts, and remaining files (images, data, binaries) are summarised per extension so they never inflate LOC totals or the treemap.
@@ -106,7 +106,7 @@ python -m codemapy <path> --artifacts
 
 Generated files:
 
-- `report.html` - human-readable file tree, treemap, and dependency graph
+- `report.html` - human-readable file tree, treemap, dependency graph, and an insights panel with entry points, top hubs, dependency cycles, and per-file details (dependencies, external references, symbol outline)
 - `context.json` - full machine-readable scan data for AI agents, including imports, per-file symbol counts, dependency edges, circular-dependency groups, documentation files, asset summaries, and project metadata files such as lockfiles and config files (full symbol detail lives in `symbols.json`)
 - `summary.md` - compact project briefing for agent context: languages, a directory overview, entry points, top hubs, largest files, dependency cycles, symbols by kind, external references, documentation and metadata files, and a guide to the other artifacts
 - `hubs.json` - fan-in/fan-out sorted dependency data

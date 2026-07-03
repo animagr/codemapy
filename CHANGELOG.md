@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added a `keep_dirs` key to `.codemap.json` that re-includes directory names the built-in defaults would ignore (e.g. a real `build/` or `db/` source directory).
 - Added nesting for tree-sitter symbols by span containment, so methods are recorded under their declaring class across all tree-sitter languages and the `symbols.json` index now maps names to qualified entries such as `Widget.update` instead of bare method names.
 - Entry-point detection also reads `pyproject.toml` and `package.json` manifests in subdirectories (e.g. `frontend/package.json`), and recognises `launcher.py` and `run.py`.
+- Entry-point detection now also reports any C, C++, Go, or Rust file whose extracted symbols define a top-level `main()` function, annotated as `(defines main())`. This catches firmware-style entry points that live in files not named `main.c` (e.g. a NIOS II app's `fw_cy_nimbus.c`) and works at any directory depth, unlike the basename heuristics.
+- Added Verilog/SystemVerilog symbol extraction via the tree-sitter language pack: `.v`, `.vh`, `.sv`, and `.svh` files now record their modules, functions, and tasks with line spans. Functions and tasks nest under their declaring module, so the `symbols.json` index records qualified names such as `counter.next_value`. Dependency extraction (`` `include ``/instantiations) is unchanged.
 
 ### Removed
 
@@ -26,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Gitignore matching now uses `pathspec` (new runtime dependency) for exact git semantics, including `**` patterns and `*` not crossing directory boundaries. The previous fnmatch-based matcher remains as a fallback when `pathspec` is not installed.
 - The tree-sitter backend now caches parse trees so import extraction and symbol extraction of the same file parse it once instead of twice.
 - `context.json` no longer records per-file absolute paths or a `generated_at` timestamp (the root is recorded once and the timestamp lives in `manifest.json`), making artifacts diff-stable and machine-portable. The artifact schema version is now 2.
+- Reworked the human `report.html` viewer: a new Insights panel lists entry points, top hubs, and dependency cycles, and clicking any file (in the tree, treemap, or graph) opens a details view with its language, LOC, size, fan-in/out, internal dependencies in both directions, external references, and a symbol outline. The header gains symbol and cycle count chips, a language color legend sits below it, treemap tiles and graph nodes have hover tooltips, and the chart palette was replaced with a colorblind-safe one (the old blue/violet pair was indistinguishable under deuteranopia).
 
 ### Fixed
 

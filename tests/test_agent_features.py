@@ -10,6 +10,7 @@ from pathlib import Path
 from codemapy.artifacts import check_artifacts, report_payload, summary_markdown, symbols_payload, write_artifacts
 from codemapy.config import Config, load_config
 from codemapy.graph import build_report
+from codemapy.models import FileNode, ModuleNode, Report, Symbol
 from codemapy.render.html import render_html
 from codemapy.scanner import scan_project
 from codemapy.ts import backend
@@ -255,6 +256,96 @@ class StalenessCheckTests(unittest.TestCase):
             code, message = check_artifacts(root)
             self.assertEqual(1, code, message)
             self.assertIn("app.py", message)
+
+
+class EntryPointTests(unittest.TestCase):
+    @staticmethod
+    def _c_module(path: str, symbols: tuple[Symbol, ...]) -> ModuleNode:
+        return ModuleNode(path=path, language="C", loc=10, size=100, symbols=symbols)
+
+    def test_main_definer_detected_from_symbols(self) -> None:
+        main_symbol = Symbol(name="main", kind="function", start_line=3, end_line=9)
+        report = Report(
+            root=Path("/proj"),
+            files=(),
+            modules=(self._c_module("fw/nested/controller.c", (main_symbol,)),),
+            edges=(),
+        )
+        text = summary_markdown(report, "2026-07-03T00:00:00+00:00")
+        self.assertIn("- `fw/nested/controller.c` (defines main())", text)
+
+    def test_main_definer_not_duplicated_with_basename_match(self) -> None:
+        main_symbol = Symbol(name="main", kind="function", start_line=1, end_line=2)
+        file = FileNode(
+            path="main.c",
+            absolute_path=Path("/proj/main.c"),
+            size=100,
+            loc=10,
+            extension=".c",
+            language="C",
+        )
+        report = Report(
+            root=Path("/proj"),
+            files=(file,),
+            modules=(self._c_module("main.c", (main_symbol,)),),
+            edges=(),
+        )
+        text = summary_markdown(report, "2026-07-03T00:00:00+00:00")
+        section = text.split("## Entry Points")[1].split("##")[0]
+        self.assertEqual(1, section.count("- `main.c`"))
+        self.assertIn("- `main.c` (defines main())", section)
+
+    def test_main_function_outside_main_languages_is_ignored(self) -> None:
+        main_symbol = Symbol(name="main", kind="function", start_line=1, end_line=2)
+        module = ModuleNode(path="tools/helper.py", language="Python", loc=10, size=100, symbols=(main_symbol,))
+        report = Report(root=Path("/proj"), files=(), modules=(module,), edges=())
+        text = summary_markdown(report, "2026-07-03T00:00:00+00:00")
+        self.assertNotIn("tools/helper.py", text.split("## Entry Points")[1].split("##")[0])
+
+
+class HtmlReportTests(unittest.TestCase):
+    def test_report_embeds_insights_payload_and_panels(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(
+                root,
+                {
+                    "pkg/__init__.py": "",
+                    "pkg/a.py": "import pkg.b\n",
+                    "pkg/b.py": "import pkg.a\n",
+                },
+            )
+            report = build_report(root, scan_project(root, Config()))
+            html = render_html(report)
+
+        for marker in (
+            '"entry_points"',
+            '"cycles"',
+            '"symbol_count"',
+            'id="legend"',
+            ">Entry Points<",
+            ">Top Hubs<",
+            ">Dependency Cycles<",
+            ">Insights<",
+        ):
+            self.assertIn(marker, html)
+        # The a<->b import cycle must surface in both the payload and the chip.
+        self.assertIn("1 cycles", html)
+
+    def test_symbol_outline_is_capped(self) -> None:
+        from codemapy.render.html import MAX_HTML_SYMBOLS_PER_FILE, _report_payload
+
+        symbols = tuple(
+            Symbol(name=f"f{i}", kind="function", start_line=i + 1, end_line=i + 1)
+            for i in range(MAX_HTML_SYMBOLS_PER_FILE + 10)
+        )
+        module = ModuleNode(path="big.c", language="C", loc=1, size=1, symbols=symbols)
+        report = Report(root=Path("/proj"), files=(), modules=(module,), edges=())
+        payload = _report_payload(report)
+        entry = payload["modules"][0]
+        self.assertEqual(MAX_HTML_SYMBOLS_PER_FILE, len(entry["symbols"]))
+        self.assertEqual(10, entry["symbols_omitted"])
+        self.assertEqual(MAX_HTML_SYMBOLS_PER_FILE + 10, entry["symbol_count"])
 
 
 class HtmlEscapingTests(unittest.TestCase):
