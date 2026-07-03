@@ -16,7 +16,9 @@ def write_html(report: Report, output: Path) -> Path:
 
 def render_html(report: Report) -> str:
     payload = _report_payload(report)
-    data_json = json.dumps(payload, ensure_ascii=False)
+    # Escape "</" so scanned content (e.g. an import string containing
+    # "</script>") cannot break out of the inline <script> block.
+    data_json = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
     return f"""<!doctype html>
 <html lang="en">
 <head>

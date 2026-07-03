@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import json
+import shutil
+import tomllib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from codemapy.config import is_default_ignored_dir_name, is_project_metadata_file
-from codemapy.models import ModuleNode, Report, Symbol
+from codemapy import gitinfo
+from codemapy.config import load_config
+from codemapy.models import AuxFile, ModuleNode, Report, Symbol
 from codemapy.render.html import write_html
+from codemapy.scanner import scan_project
 
 
 ARTIFACT_DIR_NAME = ".codemapy"
-ARTIFACT_VERSION = 1
+ARTIFACT_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -36,11 +40,20 @@ def artifact_dir_exists(root: Path) -> bool:
 
 
 def write_artifacts(report: Report, output_dir: Path | None = None) -> ArtifactPaths:
-    """Write human and agent-readable artifacts for a scanned project."""
+    """Write human and agent-readable artifacts for a scanned project.
+
+    Rewriting replaces the ``.codemapy`` folder wholesale, so artifacts left
+    behind by older codemapy versions cannot linger. Custom ``output_dir``
+    targets are never cleared, only the tool-owned ``.codemapy`` directory.
+    """
     directory = (output_dir or report.root / ARTIFACT_DIR_NAME).resolve()
+    if directory.name == ARTIFACT_DIR_NAME and directory.exists():
+        shutil.rmtree(directory, ignore_errors=True)
     directory.mkdir(parents=True, exist_ok=True)
 
     generated_at = datetime.now(timezone.utc).isoformat()
+    git_commit = gitinfo.head_commit(report.root)
+    git_dirty = gitinfo.is_dirty(report.root) if git_commit else None
     paths = ArtifactPaths(
         directory=directory,
         report=directory / "report.html",
@@ -52,19 +65,68 @@ def write_artifacts(report: Report, output_dir: Path | None = None) -> ArtifactP
     )
 
     write_html(report, paths.report)
-    paths.context.write_text(_json_dumps(report_payload(report, generated_at)), encoding="utf-8")
+    paths.context.write_text(_json_dumps(report_payload(report)), encoding="utf-8")
     paths.hubs.write_text(_json_dumps(hubs_payload(report)), encoding="utf-8")
     paths.symbols.write_text(_json_dumps(symbols_payload(report)), encoding="utf-8")
-    paths.summary.write_text(summary_markdown(report, generated_at), encoding="utf-8")
-    paths.manifest.write_text(_json_dumps(manifest_payload(report, paths, generated_at)), encoding="utf-8")
+    paths.summary.write_text(
+        summary_markdown(report, generated_at, git_commit=git_commit, git_dirty=git_dirty),
+        encoding="utf-8",
+    )
+    paths.manifest.write_text(
+        _json_dumps(manifest_payload(report, paths, generated_at, git_commit=git_commit, git_dirty=git_dirty)),
+        encoding="utf-8",
+    )
     return paths
 
 
-def report_payload(report: Report, generated_at: str | None = None) -> dict[str, object]:
-    metadata_files = metadata_files_payload(report.root)
+def check_artifacts(root: Path) -> tuple[int, str]:
+    """Return ``(exit_code, message)``: 0 fresh, 1 stale, 2 missing/unreadable."""
+    root = root.resolve()
+    manifest_path = artifact_dir_for(root) / "manifest.json"
+    if not manifest_path.exists():
+        return 2, f"No artifacts found at {manifest_path.parent} (generate them with --artifacts)"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return 2, f"Unreadable manifest: {manifest_path}"
+
+    recorded_commit = manifest.get("git_commit")
+    current_commit = gitinfo.head_commit(root)
+    if recorded_commit and current_commit:
+        if recorded_commit != current_commit:
+            return 1, (
+                f"Stale: HEAD moved from {recorded_commit[:12]} to {current_commit[:12]} "
+                "(refresh with --artifacts --yes)"
+            )
+        if manifest.get("git_dirty") or gitinfo.is_dirty(root):
+            return 1, "Stale: the working tree has uncommitted changes (refresh with --artifacts --yes)"
+        return 0, f"Fresh: artifacts match clean HEAD {current_commit[:12]}"
+    return _check_by_mtime(root, manifest)
+
+
+def _check_by_mtime(root: Path, manifest: dict[str, object]) -> tuple[int, str]:
+    generated_raw = manifest.get("generated_at")
+    try:
+        generated = datetime.fromisoformat(str(generated_raw)).timestamp()
+    except (TypeError, ValueError):
+        return 1, "Stale: manifest has no git commit and no usable generated_at timestamp"
+
+    newest: tuple[float, str] | None = None
+    for file in scan_project(root, load_config(root)).sources:
+        try:
+            mtime = file.absolute_path.stat().st_mtime
+        except OSError:
+            continue
+        if newest is None or mtime > newest[0]:
+            newest = (mtime, file.path)
+    if newest and newest[0] > generated:
+        return 1, f"Stale: {newest[1]} was modified after the artifacts were generated"
+    return 0, "Fresh: no source file modified since the artifacts were generated"
+
+
+def report_payload(report: Report) -> dict[str, object]:
     return {
         "version": ARTIFACT_VERSION,
-        "generated_at": generated_at,
         "root": str(report.root),
         "name": report.name,
         "summary": {
@@ -75,12 +137,12 @@ def report_payload(report: Report, generated_at: str | None = None) -> dict[str,
             "external_references": len(report.external_imports),
             "symbols": sum(_symbol_count(module.symbols) for module in report.modules),
             "cycles": len(report.cycles),
+            "doc_files": len(report.doc_files),
             "languages": report.languages,
         },
         "files": [
             {
                 "path": file.path,
-                "absolute_path": str(file.absolute_path),
                 "language": file.language,
                 "extension": file.extension,
                 "loc": file.loc,
@@ -88,7 +150,12 @@ def report_payload(report: Report, generated_at: str | None = None) -> dict[str,
             }
             for file in report.files
         ],
-        "metadata_files": metadata_files,
+        "metadata_files": [_aux_payload(item) for item in report.metadata_files],
+        "doc_files": [_aux_payload(item) for item in report.doc_files],
+        "assets": [
+            {"extension": group.extension, "count": group.count, "size": group.size}
+            for group in report.asset_groups
+        ],
         "modules": [
             {
                 "path": module.path,
@@ -118,6 +185,10 @@ def report_payload(report: Report, generated_at: str | None = None) -> dict[str,
         "cycles": [list(cycle) for cycle in report.cycles],
         "warnings": list(report.warnings),
     }
+
+
+def _aux_payload(item: AuxFile) -> dict[str, object]:
+    return {"path": item.path, "kind": item.kind, "size": item.size, "loc": item.loc}
 
 
 def symbols_payload(report: Report) -> dict[str, object]:
@@ -194,11 +265,18 @@ def hubs_payload(report: Report) -> dict[str, object]:
     }
 
 
-def manifest_payload(report: Report, paths: ArtifactPaths, generated_at: str) -> dict[str, object]:
-    metadata_files = metadata_files_payload(report.root)
+def manifest_payload(
+    report: Report,
+    paths: ArtifactPaths,
+    generated_at: str,
+    git_commit: str | None = None,
+    git_dirty: bool | None = None,
+) -> dict[str, object]:
     return {
         "version": ARTIFACT_VERSION,
         "generated_at": generated_at,
+        "git_commit": git_commit,
+        "git_dirty": git_dirty,
         "root": str(report.root),
         "artifact_dir": str(paths.directory),
         "files": {
@@ -211,14 +289,15 @@ def manifest_payload(report: Report, paths: ArtifactPaths, generated_at: str) ->
         },
         "counts": {
             "files": len(report.files),
-            "metadata_files": len(metadata_files),
+            "metadata_files": len(report.metadata_files),
+            "doc_files": len(report.doc_files),
             "loc": report.total_loc,
             "internal_dependencies": len(report.edges),
             "external_references": len(report.external_imports),
             "symbols": sum(_symbol_count(module.symbols) for module in report.modules),
             "cycles": len(report.cycles),
         },
-        "metadata_files": metadata_files,
+        "metadata_files": [_aux_payload(item) for item in report.metadata_files],
         "languages": report.languages,
         "artifact_bytes": _artifact_sizes(paths),
         "notes": artifact_notes(paths),
@@ -250,27 +329,46 @@ def artifact_notes(paths: ArtifactPaths) -> list[str]:
     return notes
 
 
-def summary_markdown(report: Report, generated_at: str | None = None) -> str:
+def summary_markdown(
+    report: Report,
+    generated_at: str | None = None,
+    git_commit: str | None = None,
+    git_dirty: bool | None = None,
+) -> str:
     lines = [
         "# codemapy summary",
         "",
         f"- Root: `{report.root}`",
         f"- Generated: `{generated_at or ''}`",
-        f"- Files: {len(report.files)}",
-        f"- LOC: {report.total_loc}",
-        f"- Internal dependencies: {len(report.edges)}",
-        f"- External references: {len(report.external_imports)}",
-        f"- Symbols: {sum(_symbol_count(module.symbols) for module in report.modules)}",
-        f"- Dependency cycles: {len(report.cycles)}",
-        "",
-        "## Languages",
-        "",
     ]
+    if git_commit:
+        dirty_note = " (dirty working tree)" if git_dirty else ""
+        lines.append(f"- Git commit: `{git_commit[:12]}`{dirty_note}")
+    lines.extend(
+        [
+            f"- Files: {len(report.files)}",
+            f"- LOC: {report.total_loc}",
+            f"- Internal dependencies: {len(report.edges)}",
+            f"- External references: {len(report.external_imports)}",
+            f"- Symbols: {sum(_symbol_count(module.symbols) for module in report.modules)}",
+            f"- Dependency cycles: {len(report.cycles)}",
+            "",
+            "## Languages",
+            "",
+        ]
+    )
 
     if report.languages:
         lines.extend(f"- {language}: {count} files" for language, count in report.languages.items())
     else:
         lines.append("- None detected")
+
+    lines.extend(["", "## Directory Overview", ""])
+    lines.extend(_directory_overview(report))
+
+    lines.extend(["", "## Entry Points", ""])
+    entry_points = _entry_points(report)
+    lines.extend(entry_points if entry_points else ["- None detected"])
 
     lines.extend(["", "## Top Hubs", ""])
     hubs = [module for module in _ranked_modules(report) if module.fan_in or module.fan_out][:10]
@@ -281,6 +379,13 @@ def summary_markdown(report: Report, generated_at: str | None = None) -> str:
         )
     else:
         lines.append("- No internal dependency edges detected")
+
+    lines.extend(["", "## Largest Files", ""])
+    largest = sorted(report.files, key=lambda file: (-file.loc, file.path))[:10]
+    if largest:
+        lines.extend(f"- `{file.path}`: {file.loc} loc" for file in largest)
+    else:
+        lines.append("- None")
 
     lines.extend(["", "## Dependency Cycles", ""])
     if report.cycles:
@@ -305,17 +410,192 @@ def summary_markdown(report: Report, generated_at: str | None = None) -> str:
     else:
         lines.append("- None")
 
+    lines.extend(["", "## Documentation Files", ""])
+    lines.extend(_doc_file_lines(report))
+
     lines.extend(["", "## Project Metadata Files", ""])
-    metadata_files = metadata_files_payload(report.root)
-    if metadata_files:
+    if report.metadata_files:
         lines.extend(
-            f"- `{item['path']}`: {item['kind']}, {item['loc']} loc, {item['size']} bytes"
-            for item in metadata_files
+            f"- `{item.path}`: {item.kind}, {item.loc} loc, {item.size} bytes"
+            for item in report.metadata_files
         )
     else:
         lines.append("- None")
 
+    lines.extend(["", "## Other Files", ""])
+    lines.extend(_asset_lines(report))
+
+    lines.extend(
+        [
+            "",
+            "## Artifact Guide",
+            "",
+            "- `context.json`: full scan data - files, imports, dependency edges, cycles, per-file symbol counts",
+            "- `symbols.json`: per-file definitions plus an `index` mapping each defined name to its locations",
+            "- `hubs.json`: modules ranked by fan-in / fan-out",
+            "- `manifest.json`: generation metadata, artifact byte sizes, and `git_commit` for staleness checks",
+            "- `report.html`: visual file tree, treemap, and dependency graph for humans",
+        ]
+    )
+
     return "\n".join(lines) + "\n"
+
+
+MAX_OVERVIEW_DIRS = 15
+
+
+def _directory_overview(report: Report) -> list[str]:
+    """Group source files by top directory: count, LOC, and dominant language."""
+    if not report.files:
+        return ["- None"]
+
+    depth = 1
+    top_level = {_group_key(file.path, 1) for file in report.files}
+    if len(top_level) == 1 and "." not in top_level:
+        # Everything lives under a single directory (e.g. `src/`); show one
+        # more level so the overview says something useful.
+        depth = 2
+
+    groups: dict[str, tuple[int, int, dict[str, int]]] = {}
+    for file in report.files:
+        key = _group_key(file.path, depth)
+        count, loc, languages = groups.setdefault(key, (0, 0, {}))
+        languages[file.language or "Other"] = languages.get(file.language or "Other", 0) + 1
+        groups[key] = (count + 1, loc + file.loc, languages)
+
+    ranked = sorted(groups.items(), key=lambda item: (-item[1][1], item[0]))
+    lines = []
+    for key, (count, loc, languages) in ranked[:MAX_OVERVIEW_DIRS]:
+        dominant = max(sorted(languages), key=lambda lang: languages[lang])
+        lines.append(f"- `{key}`: {count} files, {loc} loc ({dominant})")
+    if len(ranked) > MAX_OVERVIEW_DIRS:
+        lines.append(f"- ... and {len(ranked) - MAX_OVERVIEW_DIRS} more directories")
+    return lines
+
+
+def _group_key(path: str, depth: int) -> str:
+    parts = path.split("/")
+    if len(parts) <= depth:
+        return "/".join(parts[:-1]) + "/" if len(parts) > 1 else "."
+    return "/".join(parts[:depth]) + "/"
+
+
+ENTRY_POINT_BASENAMES = {
+    "__main__.py",
+    "main.py",
+    "app.py",
+    "manage.py",
+    "launcher.py",
+    "run.py",
+    "main.c",
+    "main.cpp",
+    "main.go",
+    "main.rs",
+    "main.lua",
+    "main.gd",
+    "program.cs",
+    "main.java",
+    "index.js",
+    "index.ts",
+}
+MAX_ENTRY_POINTS = 10
+MAX_ENTRY_POINT_DEPTH = 3
+
+
+def _entry_points(report: Report) -> list[str]:
+    lines: list[str] = []
+    manifests = [
+        item.path
+        for item in report.metadata_files
+        if item.path.rsplit("/", 1)[-1].lower() in {"pyproject.toml", "package.json"}
+        and len(item.path.split("/")) <= MAX_ENTRY_POINT_DEPTH
+    ]
+    manifests.sort(key=lambda path: (len(path.split("/")), path))
+    for rel in manifests:
+        prefix = f"{rel.rsplit('/', 1)[0]}/" if "/" in rel else ""
+        if rel.endswith("pyproject.toml"):
+            lines.extend(_pyproject_scripts(report.root / rel, rel))
+        else:
+            lines.extend(_package_json_entries(report.root / rel, rel, prefix))
+
+    candidates = [
+        file.path
+        for file in report.files
+        if file.path.rsplit("/", 1)[-1].lower() in ENTRY_POINT_BASENAMES
+        and len(file.path.split("/")) <= MAX_ENTRY_POINT_DEPTH
+    ]
+    candidates.sort(key=lambda path: (len(path.split("/")), path))
+    lines.extend(f"- `{path}`" for path in candidates)
+    return lines[:MAX_ENTRY_POINTS]
+
+
+def _pyproject_scripts(path: Path, rel: str) -> list[str]:
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+        return []
+    project = data.get("project")
+    if not isinstance(project, dict):
+        return []
+    lines = []
+    for table_name in ("scripts", "gui-scripts"):
+        scripts = project.get(table_name)
+        if isinstance(scripts, dict):
+            lines.extend(
+                f"- `{name}` -> `{target}` ({rel} script)"
+                for name, target in sorted(scripts.items())
+            )
+    return lines
+
+
+def _package_json_entries(path: Path, rel: str, prefix: str) -> list[str]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    lines = []
+    main = data.get("main")
+    if isinstance(main, str):
+        lines.append(f"- `{prefix}{main}` ({rel} main)")
+    bin_field = data.get("bin")
+    if isinstance(bin_field, str):
+        lines.append(f"- `{prefix}{bin_field}` ({rel} bin)")
+    elif isinstance(bin_field, dict):
+        lines.extend(
+            f"- `{prefix}{target}` ({rel} bin: {name})"
+            for name, target in sorted(bin_field.items())
+            if isinstance(target, str)
+        )
+    return lines
+
+
+MAX_DOC_FILES = 15
+MAX_ASSET_GROUPS = 10
+
+
+def _doc_file_lines(report: Report) -> list[str]:
+    if not report.doc_files:
+        return ["- None"]
+    docs = sorted(report.doc_files, key=lambda item: (len(item.path.split("/")), item.path))
+    lines = [f"- `{item.path}` ({item.loc} loc)" for item in docs[:MAX_DOC_FILES]]
+    if len(docs) > MAX_DOC_FILES:
+        lines.append(f"- ... and {len(docs) - MAX_DOC_FILES} more")
+    return lines
+
+
+def _asset_lines(report: Report) -> list[str]:
+    if not report.asset_groups:
+        return ["- None"]
+    groups = sorted(report.asset_groups, key=lambda group: (-group.size, group.extension))
+    lines = [
+        f"- `{group.extension}`: {group.count} files, {group.size} bytes"
+        for group in groups[:MAX_ASSET_GROUPS]
+    ]
+    if len(groups) > MAX_ASSET_GROUPS:
+        lines.append(f"- ... and {len(groups) - MAX_ASSET_GROUPS} more extensions")
+    return lines
 
 
 def _ranked_modules(report: Report) -> list[ModuleNode]:
@@ -380,59 +660,6 @@ def _module_payload(module: ModuleNode) -> dict[str, object]:
         "fan_in": module.fan_in,
         "fan_out": module.fan_out,
     }
-
-
-def metadata_files_payload(root: Path) -> list[dict[str, object]]:
-    root = root.resolve()
-    files: list[dict[str, object]] = []
-    for path in sorted(root.rglob("*")):
-        if not path.is_file():
-            continue
-        if not is_project_metadata_file(path):
-            continue
-        rel = path.relative_to(root).as_posix()
-        if _is_in_ignored_dir(path, root):
-            continue
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
-        files.append(
-            {
-                "path": rel,
-                "absolute_path": str(path),
-                "kind": _metadata_kind(path.name),
-                "size": stat.st_size,
-                "loc": _count_loc(path),
-            }
-        )
-    return files
-
-
-def _metadata_kind(name: str) -> str:
-    lowered = name.lower()
-    if lowered.endswith(".lock") or "lock" in lowered or lowered in {"go.sum", "requirements.txt"}:
-        return "dependency-lockfile"
-    if lowered.endswith((".toml", ".ini", ".json", ".yaml", ".yml", ".cfg")):
-        return "project-config"
-    return "project-metadata"
-
-
-def _is_in_ignored_dir(path: Path, root: Path) -> bool:
-    parts = path.relative_to(root).parts[:-1]
-    return any(is_default_ignored_dir_name(part) for part in parts)
-
-
-def _count_loc(path: Path) -> int:
-    try:
-        count = 0
-        with path.open("r", encoding="utf-8", errors="ignore") as handle:
-            for line in handle:
-                if line.strip():
-                    count += 1
-        return count
-    except OSError:
-        return 0
 
 
 def _json_dumps(payload: dict[str, object]) -> str:

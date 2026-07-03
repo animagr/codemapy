@@ -24,6 +24,19 @@ def _report(tmp: str, files: dict[str, str]):
     return root, build_report(root, scan_project(root, Config()))
 
 
+def _flat_kinds(symbols) -> set[tuple[str, str]]:
+    """Collect (name, kind) pairs for symbols and all nested children."""
+    pairs: set[tuple[str, str]] = set()
+
+    def walk(items) -> None:
+        for symbol in items:
+            pairs.add((symbol.name, symbol.kind))
+            walk(symbol.children)
+
+    walk(symbols)
+    return pairs
+
+
 class CycleTests(unittest.TestCase):
     def test_find_cycles_detects_scc_and_self_loops(self) -> None:
         edges = [
@@ -288,7 +301,7 @@ class TreeSitterImportTests(unittest.TestCase):
                 },
             )
         module = next(m for m in report.modules if m.path == "Widget.cs")
-        kinds = {(s.name, s.kind) for s in module.symbols}
+        kinds = _flat_kinds(module.symbols)
         self.assertIn(("IThing", "interface"), kinds)
         self.assertIn(("Widget", "class"), kinds)
         self.assertIn(("Widget", "method"), kinds)  # constructor
@@ -297,6 +310,9 @@ class TreeSitterImportTests(unittest.TestCase):
         self.assertIn(("Color", "enum"), kinds)
         self.assertIn(("Money", "record"), kinds)
         self.assertIn(("Handler", "delegate"), kinds)
+        # Members are nested under their declaring class by span containment.
+        widget = next(s for s in module.symbols if s.name == "Widget" and s.kind == "class")
+        self.assertIn(("Do", "method"), {(c.name, c.kind) for c in widget.children})
 
     def test_ruby_symbols_include_methods_and_modules(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -305,7 +321,7 @@ class TreeSitterImportTests(unittest.TestCase):
                 {"lib.rb": "class Widget\n  def render; end\nend\nmodule M; end\ndef top; end\n"},
             )
         module = next(m for m in report.modules if m.path == "lib.rb")
-        kinds = {(s.name, s.kind) for s in module.symbols}
+        kinds = _flat_kinds(module.symbols)
         self.assertIn(("Widget", "class"), kinds)
         self.assertIn(("render", "method"), kinds)
         self.assertIn(("M", "module"), kinds)

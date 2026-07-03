@@ -153,7 +153,7 @@ class ScanWindow:
             "Rewrite .codemapy artifacts?",
             (
                 f"{artifact_dir} already exists.\n\n"
-                "Rewrite .codemapy artifacts against the current codebase?"
+                "Replace its contents with fresh artifacts for the current codebase?"
             ),
             QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
             QtWidgets.QMessageBox.StandardButton.No,

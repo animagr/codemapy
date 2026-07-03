@@ -3,11 +3,11 @@ setlocal
 cd /d "%~dp0"
 set PYTHONPATH=src
 
-rem Ensure the tree-sitter backend is available so the GUI uses it (falls back gracefully if install fails).
-py -3 -c "import tree_sitter, tree_sitter_language_pack" 2>NUL
+rem Ensure the tree-sitter backend and gitignore matcher are available (falls back gracefully if install fails).
+py -3 -c "import tree_sitter, tree_sitter_language_pack, pathspec" 2>NUL
 if errorlevel 1 (
-    echo Installing tree-sitter backend...
-    py -3 -m pip install tree-sitter tree-sitter-language-pack
+    echo Installing tree-sitter backend and pathspec...
+    py -3 -m pip install tree-sitter tree-sitter-language-pack pathspec
 )
 
 py -3 src\codemapy\gui.py %*

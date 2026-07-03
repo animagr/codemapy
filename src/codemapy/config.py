@@ -206,6 +206,8 @@ def is_default_ignored_dir_name(name: str) -> bool:
 def is_project_metadata_file(path: Path) -> bool:
     name = path.name
     normalized = name.lower()
+    if normalized.startswith("requirements") and normalized.endswith(".txt"):
+        return True
     return normalized in _PROJECT_METADATA_FILES_LOWER or any(
         normalized.endswith(suffix) for suffix in _PROJECT_METADATA_SUFFIXES_LOWER
     )
@@ -219,12 +221,33 @@ def is_generated_file(path: Path) -> bool:
     )
 
 
+def metadata_kind(name: str) -> str:
+    lowered = name.lower()
+    if lowered.endswith(".lock") or "lock" in lowered or lowered in {"go.sum", "requirements.txt"}:
+        return "dependency-lockfile"
+    if lowered.endswith((".toml", ".ini", ".json", ".yaml", ".yml", ".cfg")):
+        return "project-config"
+    return "project-metadata"
+
+
 @dataclass(frozen=True)
 class Config:
     only: tuple[str, ...] = ()
     exclude: tuple[str, ...] = ()
     ignore_dirs: tuple[str, ...] = tuple(sorted(DEFAULT_IGNORES))
+    keep_dirs: tuple[str, ...] = ()
     max_file_bytes: int = 1_000_000
+
+    def is_ignored_name(self, name: str) -> bool:
+        """Return True when *name* (a file or directory basename) is ignored.
+
+        ``keep_dirs`` re-includes names that the built-in defaults would drop,
+        so projects with a real ``build/`` or ``db/`` source directory can opt
+        back in via ``.codemap.json``.
+        """
+        if name.lower() in {kept.lower() for kept in self.keep_dirs}:
+            return False
+        return name in self.ignore_dirs or is_default_ignored_dir_name(name)
 
 
 def load_config(root: Path) -> Config:
@@ -241,6 +264,7 @@ def load_config(root: Path) -> Config:
         only=tuple(_clean_exts(data.get("only", []))),
         exclude=tuple(str(item) for item in data.get("exclude", []) if str(item).strip()),
         ignore_dirs=tuple(sorted(DEFAULT_IGNORES | set(data.get("ignore_dirs", [])))),
+        keep_dirs=tuple(str(item).strip() for item in data.get("keep_dirs", []) if str(item).strip()),
         max_file_bytes=int(data.get("max_file_bytes") or 1_000_000),
     )
 
@@ -252,6 +276,7 @@ def merge_cli_config(config: Config, only: str | None, exclude: str | None) -> C
         only=cli_only or config.only,
         exclude=config.exclude + cli_exclude,
         ignore_dirs=config.ignore_dirs,
+        keep_dirs=config.keep_dirs,
         max_file_bytes=config.max_file_bytes,
     )
 

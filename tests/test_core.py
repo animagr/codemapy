@@ -630,40 +630,37 @@ class CoreTests(unittest.TestCase):
             root = Path(tmp)
             (root / ".gitignore").write_text(
                 "/bundled-tools/\n"
-                ".claude/settings.local.json\n"
-                "*.scratch\n"
-                "!keep.scratch\n",
+                "*.tmp.py\n"
+                "!keep.tmp.py\n",
                 encoding="utf-8",
             )
-            (root / ".claude").mkdir()
-            (root / ".claude" / "settings.local.json").write_text("{}", encoding="utf-8")
             (root / "bundled-tools").mkdir()
             (root / "bundled-tools" / "tool.py").write_text("print('ignored')\n", encoding="utf-8")
             (root / "app.py").write_text("print('hello')\n", encoding="utf-8")
-            (root / "notes.scratch").write_text("ignored\n", encoding="utf-8")
-            (root / "keep.scratch").write_text("visible\n", encoding="utf-8")
+            (root / "notes.tmp.py").write_text("print('ignored')\n", encoding="utf-8")
+            (root / "keep.tmp.py").write_text("print('visible')\n", encoding="utf-8")
 
             files = scan_project(root, Config())
 
-        self.assertEqual([".gitignore", "app.py", "keep.scratch"], [file.path for file in files])
+        self.assertEqual(["app.py", "keep.tmp.py"], [file.path for file in files])
 
     def test_scanner_honors_nested_gitignore(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             project = root / "ProjectA"
             project.mkdir()
-            (project / ".gitignore").write_text("output/\n*.cache\n", encoding="utf-8")
+            (project / ".gitignore").write_text("output/\n*.cache.py\n", encoding="utf-8")
             (project / "app.py").write_text("print('hello')\n", encoding="utf-8")
-            (project / "data.cache").write_text("ignored\n", encoding="utf-8")
+            (project / "data.cache.py").write_text("print('ignored')\n", encoding="utf-8")
             (project / "output").mkdir()
             (project / "output" / "generated.py").write_text("print('ignored')\n", encoding="utf-8")
             (root / "ProjectB").mkdir()
-            (root / "ProjectB" / "data.cache").write_text("visible\n", encoding="utf-8")
+            (root / "ProjectB" / "data.cache.py").write_text("print('visible')\n", encoding="utf-8")
 
             files = scan_project(root, Config())
 
         self.assertEqual(
-            ["ProjectA/.gitignore", "ProjectA/app.py", "ProjectB/data.cache"],
+            ["ProjectA/app.py", "ProjectB/data.cache.py"],
             [file.path for file in files],
         )
 

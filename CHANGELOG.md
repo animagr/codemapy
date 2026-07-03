@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] - 2026-07-03
+
+### Added
+
+- Added a `--check` CLI flag that reports whether existing `.codemapy` artifacts are stale (exit 0 fresh, 1 stale, 2 missing). Freshness is judged against the git commit and dirty state recorded in `manifest.json` (now included at generation time), falling back to source-file mtimes outside git repositories.
+- Added new `summary.md` sections aimed at agent context: a directory overview (file counts, LOC, dominant language per top directory), detected entry points (`[project.scripts]` from `pyproject.toml`, `main`/`bin` from `package.json`, and well-known main files), the largest files by LOC, documentation files, unmapped file groups, and an artifact guide describing what each `.codemapy` file contains.
+- Added file classification during scanning: documentation files (`.md`, `.rst`, `.adoc`, `.txt`, ...) and unmapped assets (images, data files, binaries) are now listed separately (`doc_files` and `assets` in `context.json`) instead of being counted as source files, so LOC totals and the treemap only reflect mapped source languages.
+- Added a `keep_dirs` key to `.codemap.json` that re-includes directory names the built-in defaults would ignore (e.g. a real `build/` or `db/` source directory).
+- Added nesting for tree-sitter symbols by span containment, so methods are recorded under their declaring class across all tree-sitter languages and the `symbols.json` index now maps names to qualified entries such as `Widget.update` instead of bare method names.
+- Entry-point detection also reads `pyproject.toml` and `package.json` manifests in subdirectories (e.g. `frontend/package.json`), and recognises `launcher.py` and `run.py`.
+
+### Removed
+
+- Rewriting artifacts now replaces the `.codemapy` folder wholesale, so files left behind by older codemapy versions are removed instead of lingering. Custom `--html`/output locations are never cleared.
+
+### Changed
+
+- Rewrote the project walk as a single pruned `os.walk` pass: ignored directories (`.git`, `node_modules`, `target`, ...) are no longer descended into, `.gitignore` files are discovered during the same walk, and project metadata is collected once instead of via three extra full-tree walks per artifact write. Large repositories scan dramatically faster.
+- Gitignore matching now uses `pathspec` (new runtime dependency) for exact git semantics, including `**` patterns and `*` not crossing directory boundaries. The previous fnmatch-based matcher remains as a fallback when `pathspec` is not installed.
+- The tree-sitter backend now caches parse trees so import extraction and symbol extraction of the same file parse it once instead of twice.
+- `context.json` no longer records per-file absolute paths or a `generated_at` timestamp (the root is recorded once and the timestamp lives in `manifest.json`), making artifacts diff-stable and machine-portable. The artifact schema version is now 2.
+
+### Fixed
+
+- Fixed a script-injection hole in `report.html`: scanned content containing `</script>` (e.g. inside an import string) could break out of the embedded data block and execute. The payload is now escaped.
+- `--open` now opens the existing `report.html` when the artifact rewrite prompt is declined, instead of silently doing nothing.
+- `requirements*.txt` variants such as `requirements-lock.txt` are now classified as dependency lockfiles instead of documentation.
+
 ## [0.1.4] - 2026-06-17
 
 ### Added
@@ -83,6 +111,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Suppressed scanned-project Python `SyntaxWarning` messages during import extraction.
 - Fixed dependency graph resolution for nested include-style paths across supported languages.
 
+[0.1.5]: https://github.com/animagr/codemapy/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/animagr/codemapy/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/animagr/codemapy/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/animagr/codemapy/compare/v0.1.1...v0.1.2

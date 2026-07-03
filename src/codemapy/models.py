@@ -43,6 +43,46 @@ class Symbol:
 
 
 @dataclass(frozen=True)
+class AuxFile:
+    """A non-source file worth listing for agents (metadata or documentation)."""
+
+    path: str
+    kind: str
+    size: int
+    loc: int
+
+
+@dataclass(frozen=True)
+class AssetGroup:
+    """Aggregate of scanned-but-unmapped files sharing an extension."""
+
+    extension: str
+    count: int
+    size: int
+
+
+@dataclass(frozen=True)
+class ScanResult:
+    """Everything a project walk found, classified.
+
+    Iterating a ``ScanResult`` yields its source files, so callers that only
+    care about sources can treat it like the plain tuple ``scan_project``
+    used to return.
+    """
+
+    sources: tuple[FileNode, ...]
+    metadata_files: tuple[AuxFile, ...] = ()
+    doc_files: tuple[AuxFile, ...] = ()
+    asset_groups: tuple[AssetGroup, ...] = ()
+
+    def __iter__(self):
+        return iter(self.sources)
+
+    def __len__(self) -> int:
+        return len(self.sources)
+
+
+@dataclass(frozen=True)
 class ModuleNode:
     path: str
     language: str
@@ -78,6 +118,9 @@ class Report:
     external_imports: tuple[ExternalImport, ...] = ()
     warnings: tuple[str, ...] = ()
     cycles: tuple[tuple[str, ...], ...] = ()
+    metadata_files: tuple[AuxFile, ...] = ()
+    doc_files: tuple[AuxFile, ...] = ()
+    asset_groups: tuple[AssetGroup, ...] = ()
 
     @property
     def name(self) -> str:

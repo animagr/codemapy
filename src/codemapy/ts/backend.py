@@ -43,6 +43,19 @@ def get_parser(name: str) -> Any | None:
         return None
 
 
+# Import and symbol extraction run back-to-back on the same file, so a tiny
+# cache keyed by (language, source) lets the second query reuse the parse.
+@lru_cache(maxsize=8)
+def _parse(name: str, source: bytes) -> Any | None:
+    parser = get_parser(name)
+    if parser is None:
+        return None
+    try:
+        return parser.parse(source)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 @lru_cache(maxsize=None)
 def _get_query(name: str, query_source: str) -> Any | None:
     language = get_language(name)
@@ -60,12 +73,11 @@ def query_captures(name: str, source: bytes, query_source: str) -> list[tuple[st
     Returns a flat list of ``(capture_name, node)`` pairs. Empty when the
     backend, grammar, or query is unavailable.
     """
-    parser = get_parser(name)
+    tree = _parse(name, source)
     query = _get_query(name, query_source)
-    if parser is None or query is None:
+    if tree is None or query is None:
         return []
     try:
-        tree = parser.parse(source)
         cursor = _tree_sitter.QueryCursor(query)
         captures: list[tuple[str, Any]] = []
         for _match_id, capture_map in cursor.matches(tree.root_node):
@@ -84,12 +96,11 @@ def query_matches(name: str, source: bytes, query_source: str) -> list[dict[str,
     callers can correlate captures that belong to the same match (e.g. a
     definition node and its name). Empty when anything is unavailable.
     """
-    parser = get_parser(name)
+    tree = _parse(name, source)
     query = _get_query(name, query_source)
-    if parser is None or query is None:
+    if tree is None or query is None:
         return []
     try:
-        tree = parser.parse(source)
         cursor = _tree_sitter.QueryCursor(query)
         return [dict(capture_map) for _match_id, capture_map in cursor.matches(tree.root_node)]
     except Exception:  # noqa: BLE001

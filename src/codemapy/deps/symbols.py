@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import warnings
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from codemapy.models import FileNode, Symbol
@@ -124,13 +125,24 @@ def extract_symbols(file: FileNode) -> tuple[Symbol, ...]:
     return _query_symbols(file.absolute_path, pack_name, query_source)
 
 
+@dataclass
+class _ProtoSymbol:
+    """A captured definition with its full span, before nesting."""
+
+    name: str
+    kind: str
+    start: tuple[int, int]
+    end: tuple[int, int]
+    children: list["_ProtoSymbol"] = field(default_factory=list)
+
+
 def _query_symbols(path: Path, pack_name: str, query_source: str) -> tuple[Symbol, ...]:
     try:
         source = path.read_bytes()
     except OSError:
         return ()
     matches = backend.query_matches(pack_name, source, query_source)
-    symbols: list[Symbol] = []
+    entries: dict[tuple[str, str, tuple[int, int], tuple[int, int]], _ProtoSymbol] = {}
     for capture_map in matches:
         name_nodes = capture_map.get("name")
         if not name_nodes:
@@ -143,17 +155,54 @@ def _query_symbols(path: Path, pack_name: str, query_source: str) -> tuple[Symbo
                 kind = capture_name[len("def.") :]
                 def_node = nodes[0]
                 break
-        symbols.append(
-            Symbol(
-                name=name_node.text.decode("utf-8", "ignore"),
-                kind=kind,
-                start_line=def_node.start_point[0] + 1,
-                end_line=def_node.end_point[0] + 1,
-            )
+        proto = _ProtoSymbol(
+            name=name_node.text.decode("utf-8", "ignore"),
+            kind=kind,
+            start=tuple(def_node.start_point[:2]),
+            end=tuple(def_node.end_point[:2]),
         )
-    # Deterministic order, de-duplicated on (name, kind, line).
-    unique = {(s.name, s.kind, s.start_line): s for s in symbols}
-    return tuple(sorted(unique.values(), key=lambda s: (s.start_line, s.name)))
+        entries.setdefault((proto.name, proto.kind, proto.start, proto.end), proto)
+    return tuple(_freeze_symbols(_nest_by_span(list(entries.values()))))
+
+
+def _nest_by_span(entries: list[_ProtoSymbol]) -> list[_ProtoSymbol]:
+    """Nest definitions whose span is contained in another definition's span.
+
+    This gives methods a parent class (and thus a qualified name in the
+    symbols index) without per-grammar nesting queries.
+    """
+    # Outermost first: earlier start, and at equal starts the larger span.
+    entries.sort(key=lambda entry: (entry.start, (-entry.end[0], -entry.end[1])))
+    roots: list[_ProtoSymbol] = []
+    stack: list[_ProtoSymbol] = []
+    for entry in entries:
+        while stack and not _contains(stack[-1], entry):
+            stack.pop()
+        if stack:
+            stack[-1].children.append(entry)
+        else:
+            roots.append(entry)
+        stack.append(entry)
+    return roots
+
+
+def _contains(parent: _ProtoSymbol, child: _ProtoSymbol) -> bool:
+    if (parent.start, parent.end) == (child.start, child.end):
+        return False
+    return parent.start <= child.start and child.end <= parent.end
+
+
+def _freeze_symbols(protos: list[_ProtoSymbol]) -> list[Symbol]:
+    return [
+        Symbol(
+            name=proto.name,
+            kind=proto.kind,
+            start_line=proto.start[0] + 1,
+            end_line=proto.end[0] + 1,
+            children=tuple(_freeze_symbols(proto.children)),
+        )
+        for proto in protos
+    ]
 
 
 def _python_symbols(path: Path) -> tuple[Symbol, ...]:

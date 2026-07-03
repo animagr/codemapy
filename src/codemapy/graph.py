@@ -5,7 +5,7 @@ from pathlib import Path
 from .deps.registry import extractor_for_ext
 from .deps.resolver import ImportResolver
 from .deps.symbols import extract_symbols
-from .models import Edge, ExternalImport, FileNode, ModuleNode, Report
+from .models import Edge, ExternalImport, FileNode, ModuleNode, Report, ScanResult
 
 # Edge kinds that express containment/declaration rather than a true dependency.
 # A Rust `mod child;` declaration paired with the idiomatic `use super::*` /
@@ -15,9 +15,12 @@ from .models import Edge, ExternalImport, FileNode, ModuleNode, Report
 DECLARATION_EDGE_KINDS = frozenset({"rust-mod"})
 
 
-def build_report(root: Path, files: tuple[FileNode, ...]) -> Report:
+def build_report(root: Path, files: ScanResult | tuple[FileNode, ...]) -> Report:
+    scan = files if isinstance(files, ScanResult) else ScanResult(sources=tuple(files))
+    files = scan.sources
     resolver = ImportResolver(root, files)
     imports_by_file = {}
+    symbols_by_file = {}
     edges: list[Edge] = []
     external: list[ExternalImport] = []
 
@@ -25,6 +28,9 @@ def build_report(root: Path, files: tuple[FileNode, ...]) -> Report:
         extractor = extractor_for_ext(file.extension)
         imports = extractor.extract(file.absolute_path) if extractor else ()
         imports_by_file[file.path] = imports
+        # Extracting symbols right after imports lets the tree-sitter backend
+        # reuse the parse tree it just built for this file.
+        symbols_by_file[file.path] = extract_symbols(file)
         for ref in imports:
             targets = resolver.resolve(file, ref)
             if targets:
@@ -42,8 +48,6 @@ def build_report(root: Path, files: tuple[FileNode, ...]) -> Report:
             continue
         out_neighbours.setdefault(edge.source, set()).add(edge.target)
         in_neighbours.setdefault(edge.target, set()).add(edge.source)
-
-    symbols_by_file = {file.path: extract_symbols(file) for file in files}
 
     modules = tuple(
         ModuleNode(
@@ -68,6 +72,9 @@ def build_report(root: Path, files: tuple[FileNode, ...]) -> Report:
         edges=tuple(edges),
         external_imports=tuple(external),
         cycles=cycles,
+        metadata_files=scan.metadata_files,
+        doc_files=scan.doc_files,
+        asset_groups=scan.asset_groups,
     )
 
 

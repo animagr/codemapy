@@ -25,6 +25,10 @@ runtime dependency, so a normal install pulls it in and codemapy uses it automat
 degrades gracefully: if the backend is unavailable, import extraction falls back to regexes and Python
 `ast`, and symbol extraction is limited to Python.
 
+`.gitignore` handling uses [pathspec](https://pypi.org/project/pathspec/) (also a declared runtime
+dependency) for exact git semantics, including `**` patterns. Without it, codemapy falls back to an
+approximate fnmatch-based matcher.
+
 ## Installation
 
 First-time setup (installs codemapy plus the tree-sitter backend):
@@ -46,8 +50,10 @@ Requires Python 3.11+.
 `codemapy` supports three levels of language handling:
 
 - **Dependency graph support** (imports resolved to internal edges): Python (`.py`), JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`), TypeScript (`.ts`, `.tsx`), Svelte (`.svelte`), GDScript (`.gd`), Lua (`.lua`), Rust (`.rs`), C# (`.cs`, via `using`/namespace resolution), C/C++ includes (`.c`, `.h`, `.cc`, `.cpp`, `.cxx`, `.hpp`), and basic Verilog/SystemVerilog (`.v`, `.vh`, `.sv`, `.svh`)
-- **Symbol extraction** (functions, classes, methods, structs, etc. recorded in `symbols.json`, counted per file in `context.json`): Python (`ast`, with signatures and docstrings), and via tree-sitter — JavaScript, TypeScript, Go, Rust, Java, C#, Ruby, C, C++, Lua, and Bash/shell scripts
+- **Symbol extraction** (functions, classes, methods, structs, etc. recorded in `symbols.json`, counted per file in `context.json`): Python (`ast`, with signatures and docstrings), and via tree-sitter — JavaScript, TypeScript, Go, Rust, Java, C#, Ruby, C, C++, Lua, and Bash/shell scripts. Definitions are nested by span, so methods carry their declaring class and the symbol index records qualified names such as `Widget.update`.
 - **File scanning, LOC counts, tree, and treemap labels:** Python, JavaScript, TypeScript, Svelte, GDScript, Verilog, SystemVerilog, Go, Rust, Ruby, Java, C#, C, C++, Swift, Kotlin, PHP, Lua, Scala, Elixir, Solidity, and shell scripts
+
+Files outside these languages are not counted as source: documentation (`.md`, `.rst`, `.adoc`, `.txt`, ...) is listed separately in the artifacts, and remaining files (images, data, binaries) are summarised per extension so they never inflate LOC totals or the treemap.
 
 Planned dependency graph support: Bash, Go, Java, and Ruby (these currently have symbol extraction but not import-resolved dependency edges).
 
@@ -59,16 +65,36 @@ python -m codemapy <path> --artifacts
 python -m codemapy <path> --artifacts --yes
 python -m codemapy <path> --json
 python -m codemapy <path> --open
+python -m codemapy <path> --check
 ```
 
+`--check` reports whether existing `.codemapy` artifacts are stale without rewriting them: exit code 0 means fresh, 1 stale, 2 missing. In a git repository the check compares the commit (and dirty state) recorded in `manifest.json` against HEAD; elsewhere it falls back to comparing source file modification times.
+
 From a checkout without installing the package, add the backend dependencies first so tree-sitter
-parsing is available (otherwise codemapy falls back to regex/`ast`):
+parsing and exact gitignore matching are available (otherwise codemapy falls back to regex/`ast`
+and fnmatch):
 
 ```bash
-python -m pip install tree-sitter tree-sitter-language-pack
+python -m pip install tree-sitter tree-sitter-language-pack pathspec
 $env:PYTHONPATH = "src"   # PowerShell
 python -m codemapy .
 ```
+
+### Configuration
+
+An optional `.codemap.json` in the project root tunes the scan:
+
+```json
+{
+  "only": ["py", "ts"],
+  "exclude": ["third_party/"],
+  "ignore_dirs": ["fixtures"],
+  "keep_dirs": ["build"],
+  "max_file_bytes": 1000000
+}
+```
+
+`keep_dirs` re-includes directory names that the built-in defaults would ignore (useful when a project has a real `build/` or `db/` source directory).
 
 ## Agent Artifacts
 
@@ -81,11 +107,11 @@ python -m codemapy <path> --artifacts
 Generated files:
 
 - `report.html` - human-readable file tree, treemap, and dependency graph
-- `context.json` - full machine-readable scan data for AI agents, including imports, per-file symbol counts, dependency edges, circular-dependency groups, and project metadata files such as lockfiles and config files (full symbol detail lives in `symbols.json`)
-- `summary.md` - compact project summary for agent context (languages, top hubs, dependency cycles, symbols by kind, external references)
+- `context.json` - full machine-readable scan data for AI agents, including imports, per-file symbol counts, dependency edges, circular-dependency groups, documentation files, asset summaries, and project metadata files such as lockfiles and config files (full symbol detail lives in `symbols.json`)
+- `summary.md` - compact project briefing for agent context: languages, a directory overview, entry points, top hubs, largest files, dependency cycles, symbols by kind, external references, documentation and metadata files, and a guide to the other artifacts
 - `hubs.json` - fan-in/fan-out sorted dependency data
 - `symbols.json` - per-file definitions plus a flat name index (`name -> [{path, qualified_name, kind, line}]`) so an agent can locate "where is X defined?" directly
-- `manifest.json` - artifact metadata, counts, and per-file byte sizes (with a note when artifacts are large)
+- `manifest.json` - artifact metadata, counts, per-file byte sizes, and the git commit/dirty state at generation time (used by `--check` for staleness)
 
 The `.codemapy/` folder is ignored by future scans.
 Common project metadata files, such as `Cargo.lock`, `package.json`, `pyproject.toml`, `CMakeLists.txt`, `tsconfig.json`, and project constraint/config files, are kept out of the source treemap and dependency graph but listed in agent artifacts.
