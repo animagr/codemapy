@@ -107,7 +107,7 @@ python -m codemapy <path> --artifacts
 Generated files:
 
 - `report.html` - human-readable file tree, treemap, dependency graph, and an insights panel with entry points, top hubs, dependency cycles, and per-file details (dependencies, external references, symbol outline)
-- `context.json` - full machine-readable scan data for AI agents, including imports, per-file symbol counts, dependency edges, circular-dependency groups, documentation files, asset summaries, and project metadata files such as lockfiles and config files (full symbol detail lives in `symbols.json`)
+- `context.json` - full machine-readable scan data for AI agents, including imports, per-file symbol counts, a `has_main_guard` flag marking directly runnable Python files, dependency edges, circular-dependency groups, documentation files, asset summaries, and project metadata files such as lockfiles and config files (full symbol detail lives in `symbols.json`)
 - `summary.md` - compact project briefing for agent context: languages, a directory overview, entry points, top hubs, largest files, dependency cycles, symbols by kind, external references, documentation and metadata files, and a guide to the other artifacts
 - `hubs.json` - fan-in/fan-out sorted dependency data
 - `symbols.json` - per-file definitions plus a flat name index (`name -> [{path, qualified_name, kind, line}]`) so an agent can locate "where is X defined?" directly
@@ -117,6 +117,17 @@ The `.codemapy/` folder is ignored by future scans.
 Common project metadata files, such as `Cargo.lock`, `package.json`, `pyproject.toml`, `CMakeLists.txt`, `tsconfig.json`, and project constraint/config files, are kept out of the source treemap and dependency graph but listed in agent artifacts.
 Generated outputs and cache/build artifacts are ignored entirely.
 If `.codemapy/` already exists, codemapy asks before rewriting it. Use `--yes` to rewrite without prompting.
+
+### Entry-Point Detection
+
+`summary.md` and the report's insights panel list detected entry points, from four signals in descending order of strength:
+
+1. **Manifest scripts** - `[project.scripts]` / `[project.gui-scripts]` in `pyproject.toml`, and `main` / `bin` in `package.json`, including manifests up to three directories deep.
+2. **Well-known basenames** near the root - `main.py`, `app.py`, `manage.py`, `index.ts`, `main.rs`, and similar.
+3. **A top-level `main()`** in C, C++, Go, or Rust, annotated `(defines main())`. This works at any depth, so it catches firmware entry points in oddly named files.
+4. **A top-level `if __name__ == "__main__":` guard** in Python, annotated `(__main__ guard)`.
+
+The guard is the weakest signal and is filtered accordingly: library modules very often carry one as a manual smoke-test harness, so a guarded file is only promoted to an entry point when **nothing imports it** (fan-in 0). Guard-only entries are ranked by fan-out — the module pulling in the most of the codebase is the application, not the demo block — and at most three are listed, so they can never crowd out the stronger signals. A guard on a file that another signal already found just adds the annotation.
 
 To write a one-off standalone HTML file outside the artifact folder:
 

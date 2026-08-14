@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.7] - 2026-08-14
+
+### Added
+
+- Entry-point detection now recognises Python files with a top-level `if __name__ == "__main__":` guard, annotated as `(__main__ guard)`, and `context.json` records the flag per module as `has_main_guard`. The guard alone is weak evidence — library modules routinely carry one as a manual smoke-test harness, and in two sampled instrument-firmware repos 12 of 17 and 38 of 43 Python files had one — so a guarded file is only promoted to an entry point when nothing imports it (`fan_in == 0`), guard-only entries are ranked by fan-out so the module that pulls in the most of the codebase comes first, and at most 3 of them are listed so they cannot crowd out manifest or `main()` evidence. Modules under a `test/` or `tests/` directory are excluded from guard promotion, since `unittest.main()` under a guard is boilerplate in every test file and a suite would otherwise claim every slot; the filename is never used as that evidence, because a root-level `test_*.py` / `*_test.py` is as often the application itself as it is a test module. A PySide6 test-bench repo whose real entry point is `11_201_test.py` (matching no known basename) went from `None detected` to that file ranked first.
+
 ## [0.1.6] - 2026-07-03
 
 ### Added

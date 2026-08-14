@@ -43,6 +43,19 @@ class Symbol:
 
 
 @dataclass(frozen=True)
+class ModuleFacts:
+    """What parsing one source file yields beyond its import list.
+
+    ``has_main_guard`` is Python-only: it records a top-level
+    ``if __name__ == "__main__":`` block, which marks the file as directly
+    runnable and feeds entry-point detection.
+    """
+
+    symbols: tuple[Symbol, ...] = ()
+    has_main_guard: bool = False
+
+
+@dataclass(frozen=True)
 class AuxFile:
     """A non-source file worth listing for agents (metadata or documentation)."""
 
@@ -92,6 +105,7 @@ class ModuleNode:
     fan_in: int = 0
     fan_out: int = 0
     symbols: tuple[Symbol, ...] = ()
+    has_main_guard: bool = False
 
 
 @dataclass(frozen=True)

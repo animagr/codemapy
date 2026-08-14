@@ -171,6 +171,10 @@ def report_payload(report: Report) -> dict[str, object]:
                 # Full symbol detail lives in symbols.json to avoid duplicating it
                 # here (which doubled artifact size on large repos).
                 "symbol_count": _symbol_count(module.symbols),
+                # Python only: the file has a top-level `__main__` guard, so it
+                # can be run directly. Paired with fan_in == 0 this is what
+                # promotes a file to an entry point.
+                "has_main_guard": module.has_main_guard,
             }
             for module in report.modules
         ],

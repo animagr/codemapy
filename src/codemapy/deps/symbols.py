@@ -1,10 +1,13 @@
-"""Symbol (definition) extraction for the agent-readable code map.
+"""Per-file parse results for the agent-readable code map.
 
 Python uses the stdlib ``ast`` so we get accurate signatures, docstrings, and
 nesting. Every other tree-sitter-covered language uses dedicated definition
 queries (see :data:`_SYMBOL_QUERIES`) which capture each definition node along
 with its name; this is far more reliable than the language pack's high-level
 structure output, which omits names for C/C++ and members for Ruby.
+
+The Python path also reports whether the file has a top-level ``__main__``
+guard, which it can do for free off the tree it already parsed.
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from codemapy.models import FileNode, Symbol
+from codemapy.models import FileNode, ModuleFacts, Symbol
 from codemapy.ts import backend
 from codemapy.ts.langmap import pack_name_for_ext
 
@@ -125,19 +128,24 @@ _SYMBOL_QUERIES: dict[str, str] = {
 _QUERY_ALIASES = {"tsx": "typescript"}
 
 
-def extract_symbols(file: FileNode) -> tuple[Symbol, ...]:
-    """Return the top-level symbols defined in *file* (nested under children)."""
+def extract_module_facts(file: FileNode) -> ModuleFacts:
+    """Return the definitions in *file*, plus whether it is directly runnable.
+
+    Symbols are top-level definitions with nested ones under ``children``. The
+    ``__main__`` guard flag is only ever set for Python, the one language where
+    that construct marks an entry point.
+    """
     if file.language == "Python":
-        return _python_symbols(file.absolute_path)
+        return _python_facts(file.absolute_path)
     if not backend.AVAILABLE:
-        return ()
+        return ModuleFacts()
     pack_name = pack_name_for_ext(file.extension)
     if pack_name is None:
-        return ()
+        return ModuleFacts()
     query_source = _SYMBOL_QUERIES.get(_QUERY_ALIASES.get(pack_name, pack_name))
     if query_source is None:
-        return ()
-    return _query_symbols(file.absolute_path, pack_name, query_source)
+        return ModuleFacts()
+    return ModuleFacts(symbols=_query_symbols(file.absolute_path, pack_name, query_source))
 
 
 @dataclass
@@ -220,15 +228,51 @@ def _freeze_symbols(protos: list[_ProtoSymbol]) -> list[Symbol]:
     ]
 
 
-def _python_symbols(path: Path) -> tuple[Symbol, ...]:
+def _python_facts(path: Path) -> ModuleFacts:
     try:
         source = path.read_text(encoding="utf-8", errors="ignore")
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", SyntaxWarning)
             tree = ast.parse(source, filename=str(path))
     except (OSError, SyntaxError, ValueError):
-        return ()
-    return tuple(_python_node_symbol(node, is_method=False) for node in _def_nodes(tree.body))
+        return ModuleFacts()
+    return ModuleFacts(
+        symbols=tuple(_python_node_symbol(node, is_method=False) for node in _def_nodes(tree.body)),
+        has_main_guard=any(
+            isinstance(node, ast.If) and _tests_main_name(node.test) for node in tree.body
+        ),
+    )
+
+
+def _tests_main_name(test: ast.expr) -> bool:
+    """True if *test* is a ``__name__``/``"__main__"`` comparison.
+
+    Covers the canonical ``__name__ == "__main__"``, its reversed form, the
+    ``__name__ in ("__main__", ...)`` variant, and any of those as one operand
+    of an ``and`` chain.
+    """
+    if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And):
+        return any(_tests_main_name(operand) for operand in test.values)
+    if not isinstance(test, ast.Compare) or len(test.ops) != 1:
+        return False
+    left, right = test.left, test.comparators[0]
+    if isinstance(test.ops[0], ast.Eq):
+        return (_is_name_dunder(left) and _is_main_string(right)) or (
+            _is_main_string(left) and _is_name_dunder(right)
+        )
+    if isinstance(test.ops[0], ast.In):
+        return _is_name_dunder(left) and isinstance(right, (ast.Tuple, ast.List, ast.Set)) and any(
+            _is_main_string(element) for element in right.elts
+        )
+    return False
+
+
+def _is_name_dunder(node: ast.expr) -> bool:
+    return isinstance(node, ast.Name) and node.id == "__name__"
+
+
+def _is_main_string(node: ast.expr) -> bool:
+    return isinstance(node, ast.Constant) and node.value == "__main__"
 
 
 def _def_nodes(body: list[ast.stmt]) -> list[ast.stmt]:

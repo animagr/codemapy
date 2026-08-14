@@ -4,7 +4,7 @@ from pathlib import Path
 
 from .deps.registry import extractor_for_ext
 from .deps.resolver import ImportResolver
-from .deps.symbols import extract_symbols
+from .deps.symbols import extract_module_facts
 from .models import Edge, ExternalImport, FileNode, ModuleNode, Report, ScanResult
 
 # Edge kinds that express containment/declaration rather than a true dependency.
@@ -26,16 +26,16 @@ def build_report(root: Path, files: ScanResult | tuple[FileNode, ...]) -> Report
     files = scan.sources
     resolver = ImportResolver(root, files)
     imports_by_file = {}
-    symbols_by_file = {}
+    facts_by_file = {}
     edges: list[Edge] = []
     external: list[ExternalImport] = []
 
     for file in files:
         extractor = extractor_for_ext(file.extension)
         imports = extractor.extract(file.absolute_path) if extractor else ()
-        # Extracting symbols right after imports lets the tree-sitter backend
+        # Parsing for symbols right after imports lets the tree-sitter backend
         # reuse the parse tree it just built for this file.
-        symbols_by_file[file.path] = extract_symbols(file)
+        facts_by_file[file.path] = extract_module_facts(file)
         kept_refs = []
         for ref in imports:
             targets = resolver.resolve(file, ref)
@@ -69,7 +69,8 @@ def build_report(root: Path, files: ScanResult | tuple[FileNode, ...]) -> Report
             imports=imports_by_file[file.path],
             fan_in=len(in_neighbours.get(file.path, ())),
             fan_out=len(out_neighbours.get(file.path, ())),
-            symbols=symbols_by_file[file.path],
+            symbols=facts_by_file[file.path].symbols,
+            has_main_guard=facts_by_file[file.path].has_main_guard,
         )
         for file in files
     )

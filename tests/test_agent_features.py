@@ -401,6 +401,131 @@ class EntryPointTests(unittest.TestCase):
         self.assertNotIn("tools/helper.py", text.split("## Entry Points")[1].split("##")[0])
 
 
+class MainGuardEntryPointTests(unittest.TestCase):
+    @staticmethod
+    def _module(path: str, *, guard: bool = True, fan_in: int = 0, fan_out: int = 0) -> ModuleNode:
+        return ModuleNode(
+            path=path,
+            language="Python",
+            loc=10,
+            size=100,
+            fan_in=fan_in,
+            fan_out=fan_out,
+            has_main_guard=guard,
+        )
+
+    @staticmethod
+    def _section(report: Report) -> str:
+        text = summary_markdown(report, "2026-07-03T00:00:00+00:00")
+        return text.split("## Entry Points")[1].split("##")[0]
+
+    def test_guard_detected_from_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(root, {"tool.py": "def go():\n    pass\n\n\nif __name__ == '__main__':\n    go()\n"})
+            report = build_report(root, scan_project(root, Config()))
+        self.assertTrue(report.modules[0].has_main_guard)
+        self.assertIn("- `tool.py` (__main__ guard)", self._section(report))
+
+    def test_guard_nested_in_a_function_is_not_an_entry_point(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(root, {"lib.py": "def go():\n    if __name__ == '__main__':\n        pass\n"})
+            report = build_report(root, scan_project(root, Config()))
+        self.assertFalse(report.modules[0].has_main_guard)
+        self.assertIn("- None detected", self._section(report))
+
+    def test_guard_variants_are_recognised(self) -> None:
+        sources = {
+            "reversed.py": "if '__main__' == __name__:\n    pass\n",
+            "membership.py": "if __name__ in ('__main__', 'x'):\n    pass\n",
+            "conjunction.py": "FLAG = True\nif __name__ == '__main__' and FLAG:\n    pass\n",
+        }
+        for rel, source in sources.items():
+            with self.subTest(rel), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                _write(root, {rel: source})
+                report = build_report(root, scan_project(root, Config()))
+                self.assertTrue(report.modules[0].has_main_guard)
+
+    def test_unrelated_dunder_comparison_is_not_a_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(root, {"lib.py": "if __doc__ == '__main__':\n    pass\n"})
+            report = build_report(root, scan_project(root, Config()))
+        self.assertFalse(report.modules[0].has_main_guard)
+
+    def test_imported_module_with_a_guard_is_not_an_entry_point(self) -> None:
+        """A demo block in a library is not a program: something imports it."""
+        report = Report(
+            root=Path("/proj"),
+            files=(),
+            modules=(self._module("driver.py", fan_in=3, fan_out=1),),
+            edges=(),
+        )
+        self.assertIn("- None detected", self._section(report))
+
+    def test_guard_entries_are_ranked_by_fan_out(self) -> None:
+        report = Report(
+            root=Path("/proj"),
+            files=(),
+            modules=(
+                self._module("widget.py", fan_out=1),
+                self._module("app.py", fan_out=9),
+                self._module("orphan.py", fan_out=0),
+            ),
+            edges=(),
+        )
+        section = self._section(report)
+        self.assertLess(section.index("app.py"), section.index("widget.py"))
+        self.assertLess(section.index("widget.py"), section.index("orphan.py"))
+
+    def test_modules_under_a_test_directory_are_excluded(self) -> None:
+        report = Report(
+            root=Path("/proj"),
+            files=(),
+            modules=(
+                self._module("tests/test_core.py", fan_out=9),
+                self._module("test/helper_check.py", fan_out=8),
+                self._module("cli.py", fan_out=1),
+            ),
+            edges=(),
+        )
+        section = self._section(report)
+        self.assertNotIn("tests/test_core.py", section)
+        self.assertNotIn("test/helper_check.py", section)
+        self.assertIn("- `cli.py` (__main__ guard)", section)
+
+    def test_test_named_file_at_the_root_is_still_an_entry_point(self) -> None:
+        """An instrument test bench is the application, not a test module."""
+        report = Report(
+            root=Path("/proj"),
+            files=(),
+            modules=(self._module("11_201_test.py", fan_out=31),),
+            edges=(),
+        )
+        self.assertIn("- `11_201_test.py` (__main__ guard)", self._section(report))
+
+    def test_guard_entries_are_capped(self) -> None:
+        modules = tuple(self._module(f"script{index}.py") for index in range(8))
+        report = Report(root=Path("/proj"), files=(), modules=modules, edges=())
+        section = self._section(report)
+        self.assertEqual(3, section.count("(__main__ guard)"))
+
+    def test_guard_entries_never_displace_manifest_scripts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sources = {f"script{index}.py": "if __name__ == '__main__':\n    pass\n" for index in range(8)}
+            sources["pyproject.toml"] = '[project]\nname = "p"\n[project.scripts]\nrealcli = "p:main"\n'
+            _write(root, sources)
+            report = build_report(root, scan_project(root, Config()))
+            # Manifest scripts are re-read from disk when entry points are
+            # rendered, so stay inside the temporary directory.
+            section = self._section(report)
+        self.assertIn("- `realcli` -> `p:main` (pyproject.toml script)", section)
+        self.assertEqual(3, section.count("(__main__ guard)"))
+
+
 class HtmlReportTests(unittest.TestCase):
     def test_report_embeds_insights_payload_and_panels(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
