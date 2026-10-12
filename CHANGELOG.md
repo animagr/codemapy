@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.8] - 2026-10-12
+
+### Added
+
+- The CLI accepts several project paths (`codemapy A B C --artifacts`) and maps each one in turn.
+- Added a repeatable `--root DIR` option that maps every immediate subfolder of `DIR` as its own project. Hidden folders and names the scanner ignores by default (`node_modules`, `build`, `venv`, ...) are skipped and listed on stderr, and a `keep_dirs` entry in the root's `.codemap.json` brings one back. `--root` combines with plain paths, and a folder named twice is mapped once.
+- When mapping more than one project, each one gets a `=== [n/N] <path> ===` header and the run ends with a `Mapped X of N projects.` line. A project that fails is reported with its traceback and the rest still run; the exit code is 1 if any failed. `--json` prints a single JSON array of reports, and `--check` prints one line per project and exits with the worst result (0 fresh, 1 stale, 2 missing).
+
+### Changed
+
+- `--html` is rejected when more than one project is being mapped, since it writes a single file. Use `--artifacts` to get a `report.html` per project.
+
+### Fixed
+
+- `codemapy.__version__` reported `0.1.4`; it now matches the package version.
+
 ## [0.1.7] - 2026-08-14
 
 ### Added
@@ -129,6 +145,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Suppressed scanned-project Python `SyntaxWarning` messages during import extraction.
 - Fixed dependency graph resolution for nested include-style paths across supported languages.
 
+[0.1.8]: https://github.com/animagr/codemapy/compare/v0.1.7...v0.1.8
+[0.1.7]: https://github.com/animagr/codemapy/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/animagr/codemapy/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/animagr/codemapy/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/animagr/codemapy/compare/v0.1.3...v0.1.4

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
@@ -7,8 +8,11 @@ import sys
 import tempfile
 import unittest
 import warnings
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
+from codemapy import cli
 from codemapy.artifacts import artifact_dir_for, write_artifacts
 from codemapy.config import Config
 from codemapy.gui import _summary_text
@@ -710,6 +714,117 @@ class CoreTests(unittest.TestCase):
             payload = json.loads(context_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["summary"]["files"], 1)
             self.assertNotIn("old", payload)
+
+
+class MultiProjectCliTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _project(self, name: str) -> Path:
+        project = self.base / name
+        project.mkdir(parents=True)
+        (project / "app.py").write_text("import os\n", encoding="utf-8")
+        return project
+
+    def _run(self, *argv: str) -> tuple[int, str]:
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+            code = cli.main(list(argv))
+        return code, stdout.getvalue()
+
+    def test_multiple_paths_write_artifacts_for_each(self) -> None:
+        first, second = self._project("one"), self._project("two")
+
+        code, out = self._run(str(first), str(second), "--artifacts", "--yes")
+
+        self.assertEqual(0, code)
+        self.assertTrue((artifact_dir_for(first) / "manifest.json").exists())
+        self.assertTrue((artifact_dir_for(second) / "manifest.json").exists())
+        self.assertIn("[1/2]", out)
+        self.assertIn("Mapped 2 of 2 projects.", out)
+
+    def test_root_maps_each_subfolder_and_skips_ignored(self) -> None:
+        workspace = self.base / "workspace"
+        alpha = self._project("workspace/alpha")
+        beta = self._project("workspace/Beta")
+        for skipped in (".git", "node_modules", "build"):
+            (workspace / skipped).mkdir()
+        (workspace / "loose.py").write_text("print('not a project')\n", encoding="utf-8")
+
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            targets = cli.resolve_targets([], [str(workspace)])
+
+        self.assertEqual([alpha.resolve(), beta.resolve()], targets)
+        self.assertIn(".git, build, node_modules", stderr.getvalue())
+
+    def test_root_combines_with_paths_without_duplicates(self) -> None:
+        alpha = self._project("workspace/alpha")
+        extra = self._project("extra")
+
+        targets = cli.resolve_targets([str(extra), str(alpha)], [str(self.base / "workspace")])
+
+        self.assertEqual([extra.resolve(), alpha.resolve()], targets)
+
+    def test_no_arguments_defaults_to_current_directory(self) -> None:
+        self.assertEqual([Path(".").resolve()], cli.resolve_targets([], []))
+
+    def test_root_without_subfolders_is_an_error(self) -> None:
+        (self.base / "empty").mkdir()
+
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            cli.main(["--root", str(self.base / "empty")])
+
+    def test_missing_path_is_an_error(self) -> None:
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            cli.main([str(self._project("real")), str(self.base / "missing")])
+
+    def test_html_rejected_with_multiple_projects(self) -> None:
+        first, second = self._project("one"), self._project("two")
+
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            cli.main([str(first), str(second), "--html", str(self.base / "r.html")])
+
+    def test_json_with_root_prints_one_array(self) -> None:
+        self._project("workspace/alpha")
+        self._project("workspace/beta")
+
+        code, out = self._run("--root", str(self.base / "workspace"), "--json")
+
+        self.assertEqual(0, code)
+        payload = json.loads(out)
+        self.assertEqual(2, len(payload))
+        self.assertEqual(["app.py"], [item["path"] for item in payload[0]["files"]])
+
+    def test_check_returns_worst_exit_code(self) -> None:
+        fresh, missing = self._project("fresh"), self._project("missing")
+        self._run(str(fresh), "--artifacts", "--yes")
+
+        code, out = self._run(str(fresh), str(missing), "--check")
+
+        self.assertEqual(2, code)
+        self.assertIn(f"{missing.resolve()}: No artifacts found", out)
+
+    def test_batch_continues_after_a_project_fails(self) -> None:
+        first, second = self._project("one"), self._project("two")
+        real_scan = cli.scan_project
+
+        def flaky_scan(root: Path, config: Config) -> object:
+            if root == first.resolve():
+                raise RuntimeError("boom")
+            return real_scan(root, config)
+
+        with mock.patch.object(cli, "scan_project", side_effect=flaky_scan):
+            code, out = self._run(str(first), str(second), "--artifacts", "--yes")
+
+        self.assertEqual(1, code)
+        self.assertFalse(artifact_dir_for(first).exists())
+        self.assertTrue((artifact_dir_for(second) / "manifest.json").exists())
+        self.assertIn("Mapped 1 of 2 projects.", out)
 
 
 if __name__ == "__main__":

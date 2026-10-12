@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+import traceback
 import webbrowser
 from pathlib import Path
 
@@ -15,19 +17,97 @@ from .artifacts import (
 )
 from .config import load_config, merge_cli_config
 from .graph import build_report
+from .models import Report
 from .render.html import write_html
 from .render.terminal import render_tree
 from .scanner import scan_project
 
 
 def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        targets = resolve_targets(args.paths, args.root or [])
+    except ValueError as exc:
+        parser.error(str(exc))
+    batch = len(targets) > 1 or bool(args.root)
+    if batch and args.html:
+        parser.error("--html writes a single file; use --artifacts to map several projects")
+
+    if args.check:
+        return _check_all(targets, batch)
+
+    json_batch: list[dict[str, object]] | None = [] if batch and args.json else None
+    failures: list[Path] = []
+    for index, root in enumerate(targets, start=1):
+        if batch and not args.json:
+            print(f"\n=== [{index}/{len(targets)}] {root} ===")
+        try:
+            _map_project(root, args, json_batch)
+        except Exception:
+            if not batch:
+                raise
+            print(f"\nFailed to map {root}:", file=sys.stderr)
+            traceback.print_exc()
+            failures.append(root)
+
+    if json_batch is not None:
+        print(json.dumps(json_batch, indent=2, sort_keys=True))
+    if batch:
+        _print_batch_summary(len(targets), failures, quiet=args.json)
+    return 1 if failures else 0
+
+
+def resolve_targets(paths: list[str], roots: list[str]) -> list[Path]:
+    """Return the project directories to map, in order and without duplicates.
+
+    Each entry in *paths* is one project. Each entry in *roots* contributes its
+    immediate subfolders as separate projects, skipping hidden folders and names
+    the root's scan configuration would ignore (``node_modules``, ``build``, ...).
+    With neither given, the current directory is mapped.
+
+    Raises:
+        ValueError: if a path or root is not a directory, or a root has no
+            subfolders left to map.
+    """
+    targets: list[Path] = []
+    for raw in paths or ([] if roots else ["."]):
+        targets.append(_existing_dir(raw))
+    for raw in roots:
+        root = _existing_dir(raw)
+        projects, skipped = _subfolders(root)
+        if skipped:
+            print(f"Skipping in {root}: {', '.join(skipped)}", file=sys.stderr)
+        if not projects:
+            raise ValueError(f"no subfolders to map in {root}")
+        targets.extend(projects)
+    return list(dict.fromkeys(targets))
+
+
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate a human-readable code map for a local project.")
-    parser.add_argument("path", nargs="?", default=".", help="Project path to scan.")
-    parser.add_argument("--html", metavar="PATH", help="Write a single-file HTML report.")
+    parser.add_argument(
+        "paths",
+        nargs="*",
+        metavar="path",
+        help="Project path(s) to scan; give several to map each one in turn (default: current directory).",
+    )
+    parser.add_argument(
+        "--root",
+        action="append",
+        metavar="DIR",
+        help="Map every immediate subfolder of DIR as its own project. Repeatable.",
+    )
+    parser.add_argument("--html", metavar="PATH", help="Write a single-file HTML report (single project only).")
     parser.add_argument("--artifacts", action="store_true", help="Write .codemapy agent artifacts.")
     parser.add_argument("--yes", action="store_true", help="Overwrite existing .codemapy artifacts without prompting.")
     parser.add_argument("--open", action="store_true", help="Open the HTML report after writing it.")
-    parser.add_argument("--json", action="store_true", help="Print report data as JSON.")
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print report data as JSON (an array of reports when mapping several projects).",
+    )
     parser.add_argument(
         "--check",
         action="store_true",
@@ -35,26 +115,61 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--only", help="Comma-separated extensions to include, such as py,js,ts.")
     parser.add_argument("--exclude", help="Comma-separated path substrings to exclude.")
-    args = parser.parse_args(argv)
+    return parser
 
-    root = Path(args.path).expanduser().resolve()
-    if not root.exists() or not root.is_dir():
-        parser.error(f"path is not a directory: {root}")
 
-    if args.check:
+def _existing_dir(raw: str) -> Path:
+    path = Path(raw).expanduser().resolve()
+    if not path.is_dir():
+        raise ValueError(f"path is not a directory: {path}")
+    return path
+
+
+def _subfolders(root: Path) -> tuple[list[Path], list[str]]:
+    """Split *root*'s child directories into ``(projects, skipped names)``."""
+    config = load_config(root)
+    projects: list[Path] = []
+    skipped: list[str] = []
+    for child in sorted(root.iterdir(), key=lambda item: item.name.lower()):
+        if not child.is_dir():
+            continue
+        if child.name.startswith(".") or config.is_ignored_name(child.name):
+            skipped.append(child.name)
+        else:
+            projects.append(child.resolve())
+    return projects, skipped
+
+
+def _check_all(targets: list[Path], batch: bool) -> int:
+    """Report artifact freshness per target; the exit code is the worst result."""
+    worst = 0
+    for root in targets:
         code, message = check_artifacts(root)
-        print(message)
-        return code
+        print(f"{root}: {message}" if batch else message)
+        worst = max(worst, code)
+    return worst
 
+
+def _map_project(root: Path, args: argparse.Namespace, json_batch: list[dict[str, object]] | None) -> None:
+    """Scan one project, print it, and write the requested outputs.
+
+    When *json_batch* is a list the JSON payload is collected there instead of
+    printed, so a multi-project run emits a single JSON array.
+    """
     config = merge_cli_config(load_config(root), args.only, args.exclude)
-    scan = scan_project(root, config)
-    report = build_report(root, scan)
+    report = build_report(root, scan_project(root, config))
 
-    if args.json:
+    if json_batch is not None:
+        json_batch.append(report_payload(report))
+    elif args.json:
         print(_report_json(report))
     else:
         print(render_tree(report))
 
+    _write_outputs(root, report, args)
+
+
+def _write_outputs(root: Path, report: Report, args: argparse.Namespace) -> None:
     artifact_paths: ArtifactPaths | None = None
     existing_report: Path | None = None
     if args.artifacts or (args.open and not args.html):
@@ -81,10 +196,17 @@ def main(argv: list[str] | None = None) -> int:
         if args.open:
             webbrowser.open(html_path.as_uri())
 
-    return 0
+
+def _print_batch_summary(total: int, failures: list[Path], quiet: bool) -> None:
+    if not quiet:
+        print(f"\nMapped {total - len(failures)} of {total} projects.")
+    if failures:
+        print("Failed:", file=sys.stderr)
+        for root in failures:
+            print(f"  {root}", file=sys.stderr)
 
 
-def _report_json(report) -> str:
+def _report_json(report: Report) -> str:
     return json.dumps(report_payload(report), indent=2, sort_keys=True)
 
 

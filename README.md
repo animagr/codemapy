@@ -66,7 +66,15 @@ python -m codemapy <path> --artifacts --yes
 python -m codemapy <path> --json
 python -m codemapy <path> --open
 python -m codemapy <path> --check
+python -m codemapy <path1> <path2> <path3> --artifacts
+python -m codemapy --root <dir> --artifacts --yes
 ```
+
+### Mapping several projects
+
+Pass several paths to map each one in turn, or `--root <dir>` to map every immediate subfolder of `<dir>` as its own project (repeat `--root` for more parents; it combines with plain paths, and duplicates are mapped once). Hidden folders and names the scanner ignores by default (`node_modules`, `build`, `venv`, ...) are skipped and listed on stderr; a `keep_dirs` entry in the root's `.codemap.json` brings one back.
+
+With more than one project, each gets a `=== [n/N] <path> ===` header, a failure in one project is reported and the rest still run (exit code 1 if any failed), `--json` prints a single JSON array, and `--check` prints one line per project and exits with the worst result. `--html` writes a single file, so it is rejected; use `--artifacts` instead. Existing `.codemapy/` folders are confirmed one by one unless `--yes` is given.
 
 `--check` reports whether existing `.codemapy` artifacts are stale without rewriting them: exit code 0 means fresh, 1 stale, 2 missing. In a git repository the check compares the commit (and dirty state) recorded in `manifest.json` against HEAD; elsewhere it falls back to comparing source file modification times.
 
