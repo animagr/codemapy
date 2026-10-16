@@ -41,11 +41,13 @@ Everything flows through frozen dataclasses defined in `models.py`.
    - `deps/resolver.ImportResolver.resolve` maps each ref to internal paths. A ref that resolves becomes an `Edge`. One that doesn't goes to `unresolved.UnresolvedClassifier`, using the candidate paths the resolver tried (`last_candidates`, collected by `_first_existing`). It becomes an `UnresolvedImport` if it names a project file, and an `ExternalImport` otherwise.
    - `testfiles.is_test_file` sets `ModuleNode.is_test` from the path and the file's imports, and `test_fan_in` counts importers that are tests.
    - Fan-in and fan-out count distinct neighbours, and `find_cycles` runs an iterative Tarjan SCC.
-   - `graph.production_hubs` / `hub_rank_key` are the one hub ranking (non-test fan-in first, tests and generated files left out). `summary.md`, `hubs.json`, and the GUI use them, and `render/html.py` mirrors the rule in JS.
+   - `graph.hub_entries` is the one hub list: production modules ranked by non-test fan-in, with tests and generated files left out and each Go package grouped into one row. `summary.md`, `hubs.json` (`top_hubs`), `report.html`, and the GUI all use it. `production_hubs` / `hub_rank_key` are the per-file version behind it.
+   - `_tested_by` fills `ModuleNode.tested_by` from test-to-file import edges plus `testfiles.subject_candidates` (a test named after its subject).
 4. The resulting `Report` feeds three outputs:
    - `render/terminal.py`.
    - `render/html.py`: one self-contained HTML string with inline CSS and JS, built directly in Python with no template engine.
-   - `artifacts.py`: writes `.codemapy/`, using `entrypoints.py` and `gitinfo.py`.
+   - `artifacts.py`: writes `.codemapy/`, using `entrypoints.py`, `coverage.py` (the Coverage section and `coverage` block), and `gitinfo.py`.
+5. `query.py` answers `--find` / `--importers` / `--tests` from an existing `.codemapy/` folder without rescanning. It only reads `context.json`, `symbols.json`, and `manifest.json`, so a field it needs must be in those files.
 
 ### Imports and symbols are separate mechanisms (on purpose)
 
@@ -64,6 +66,7 @@ Everything flows through frozen dataclasses defined in `models.py`.
 
 - `ImportResolver.__init__` builds every per-language index up front: source roots, Rust crate roots, Verilog modules, GDScript `class_name` and Godot autoloads, Lua mod roots, and C# namespaces and types.
 - `resolve()` returns a tuple. Most languages go through `_resolve_single`, which resolves to one file.
+- Go is many-valued: an import names a package folder (found through the module paths of every `go.mod` above a Go file, longest match wins), and every non-test `.go` file in it is a target. When nothing is mapped there, `_resolve_go` lists the folder's files on disk as `last_candidates`, so a skipped folder can still be named.
 - Python is many-valued for `from X import a, b`. The extractor records the imported names in `ImportRef.names`, and `_resolve_python_import` links `X` itself plus each name that is a submodule file of `X`. Namespace packages (no `__init__.py`) resolve only through their submodules.
 - C# is many-valued, because a `using` names a namespace rather than a file. Resolution matches the exact namespace (not sub-namespaces) and keeps only files whose declared types the source actually mentions. It also drops namespaces that fan out to more than `CSHARP_NAMESPACE_FANOUT_CAP` files.
 - `DECLARATION_EDGE_KINDS` (`rust-mod`) count toward fan-in and fan-out but are excluded from cycle detection. Without that, every `mod x;` + `use super::*` pair would form a fake 2-cycle.

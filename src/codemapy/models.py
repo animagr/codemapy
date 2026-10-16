@@ -144,6 +144,9 @@ class ModuleNode:
     it that comes from test files, so ``non_test_fan_in`` is what production
     code depends on. Hubs are ranked on the latter: a module that only the
     test suite imports is not a hub of the program.
+
+    ``tested_by`` lists the test files that cover this module directly: they
+    import it, or they are named after it (``foo_test.go`` for ``foo.go``).
     """
 
     path: str
@@ -158,6 +161,7 @@ class ModuleNode:
     is_test: bool = False
     is_generated: bool = False
     test_fan_in: int = 0
+    tested_by: tuple[str, ...] = ()
 
     @property
     def non_test_fan_in(self) -> int:
@@ -209,6 +213,7 @@ class Report:
     doc_files: tuple[AuxFile, ...] = ()
     asset_groups: tuple[AssetGroup, ...] = ()
     unresolved_imports: tuple[UnresolvedImport, ...] = ()
+    skipped: tuple[SkippedPath, ...] = ()
 
     @property
     def name(self) -> str:

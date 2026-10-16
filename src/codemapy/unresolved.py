@@ -12,8 +12,9 @@ An unresolved import is reported as an internal miss when either:
    direct evidence, and the skip rule is the reason.
 2. Its syntax can only name a project file (a relative JS/TS script path, a
    relative C include, a Rust ``mod x;``, a Python relative import or one
-   rooted at a top-level project package, a GDScript ``.gd`` path) and none of
-   the candidates exists. These are reported as missing.
+   rooted at a top-level project package, a GDScript ``.gd`` path, a Go import
+   under one of the repo's go.mod module paths) and none of the candidates
+   exists. These are reported as missing.
 
 Everything else stays external. The shape rules are deliberately narrow:
 include paths in C and Verilog, Lua ``require`` names and C# namespaces are
@@ -72,8 +73,16 @@ MISSING_NOTE = "it may be generated at build time, or the import may be stale"
 class UnresolvedClassifier:
     """Decide whether a failed import is an internal miss or truly external."""
 
-    def __init__(self, root: Path, files: tuple[FileNode, ...], skipped: tuple[SkippedPath, ...]) -> None:
+    def __init__(
+        self,
+        root: Path,
+        files: tuple[FileNode, ...],
+        skipped: tuple[SkippedPath, ...],
+        go_modules: Iterable[str] = (),
+    ) -> None:
+        """*go_modules* are the module paths declared by the repo's go.mod files."""
         self.root = root.resolve()
+        self._go_modules = tuple(go_modules)
         self._paths = {file.path for file in files}
         self._skipped_dirs = {item.path: item for item in skipped if item.is_dir}
         self._skipped_files = {item.path: item for item in skipped if not item.is_dir}
@@ -157,6 +166,10 @@ class UnresolvedClassifier:
             return ref.kind == "rust-mod"
         if source.language == "GDScript":
             return ref.kind == "gdscript-path" and raw.endswith(".gd")
+        if source.language == "Go":
+            return raw.startswith(RELATIVE_PATH_PREFIXES) or any(
+                raw == module or raw.startswith(f"{module}/") for module in self._go_modules
+            )
         return False
 
     def _python_names_project_module(self, source: FileNode, raw: str) -> bool:

@@ -114,3 +114,69 @@ def _in_test_directory(path: str) -> bool:
         if any(part.endswith(suffix) and part != suffix for suffix in TEST_DIRECTORY_SUFFIXES):
             return True
     return False
+
+
+# Test filename -> the stem of the file it tests, with the extensions to try.
+_SUBJECT_PATTERNS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
+    (re.compile(r"^(?P<stem>.+)_test\.go$"), (".go",)),
+    (
+        re.compile(r"^(?P<stem>.+)\.(?:test|spec)\.(?P<ext>[cm]?[jt]sx?|svelte)$"),
+        (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".svelte"),
+    ),
+    (re.compile(r"^(?:test_(?P<stem>.+)|(?P<stem2>.+)_test)\.py$"), (".py",)),
+    (re.compile(r"^(?P<stem>.+)_(?:spec|test)\.rb$"), (".rb",)),
+    (re.compile(r"^(?P<stem>.+?)(?:Test|Tests)\.(?P<ext>java|kt|scala|cs)$"), ()),
+    (re.compile(r"^(?P<stem>.+?)(?:Spec|Suite)\.(?P<ext>kt|scala)$"), ()),
+    (re.compile(r"^(?:tb_(?P<stem>.+)|(?P<stem2>.+)_tb)\.s?v$"), (".v", ".sv")),
+    (
+        re.compile(r"^(?:test_(?P<stem>.+)|(?P<stem2>.+)_(?:test|unittest))\.(?:c|cc|cpp|cxx)$"),
+        (".c", ".cc", ".cpp", ".cxx", ".h", ".hpp"),
+    ),
+)
+
+# Mirrored test trees: the test's folder -> the folders its subject may sit in.
+_MIRRORED_ROOTS = (
+    ("src/test/", ("src/main/",)),
+    ("spec/", ("app/", "lib/")),
+)
+_SIBLING_TEST_FOLDERS = frozenset({"__tests__", "tests", "test"})
+
+
+def subject_candidates(path: str) -> list[str]:
+    """Files that the test at *path* is named after, most likely first.
+
+    The subject sits beside the test (``foo_test.go`` -> ``foo.go``), one
+    level up from a ``__tests__/`` or ``tests/`` folder, or in a mirrored
+    tree (``src/test/java/a/FooTest.java`` -> ``src/main/java/a/Foo.java``,
+    ``spec/models/user_spec.rb`` -> ``app/models/user.rb``).
+    """
+    folder, _, name = path.rpartition("/")
+    for pattern, extensions in _SUBJECT_PATTERNS:
+        match = pattern.match(name)
+        if match is None:
+            continue
+        stem = match.group("stem") or match.groupdict().get("stem2")
+        own_ext = f".{match.group('ext')}" if "ext" in match.groupdict() and match.group("ext") else ""
+        names = [f"{stem}{ext}" for ext in dict.fromkeys(((own_ext,) if own_ext else ()) + extensions)]
+        return [
+            f"{subject_folder}/{subject}" if subject_folder else subject
+            for subject_folder in _subject_folders(folder)
+            for subject in names
+        ]
+    return []
+
+
+def _subject_folders(folder: str) -> list[str]:
+    folders = [folder]
+    parent, _, last = folder.rpartition("/")
+    if last in _SIBLING_TEST_FOLDERS:
+        folders.append(parent)
+    padded = f"{folder}/"
+    for test_root, subject_roots in _MIRRORED_ROOTS:
+        at = padded.find(test_root)
+        if at == 0 or (at > 0 and padded[at - 1] == "/"):
+            folders.extend(
+                (padded[:at] + subject_root + padded[at + len(test_root) :]).rstrip("/")
+                for subject_root in subject_roots
+            )
+    return folders

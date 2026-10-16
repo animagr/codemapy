@@ -5,6 +5,7 @@ import json
 import sys
 import traceback
 import webbrowser
+from dataclasses import asdict
 from pathlib import Path
 
 from .artifacts import (
@@ -18,6 +19,20 @@ from .artifacts import (
 from .config import load_config, merge_cli_config
 from .graph import build_report
 from .models import Report
+from .query import (
+    FIND_DEFAULT_LIMIT,
+    LIST_DEFAULT_LIMIT,
+    ArtifactsMissing,
+    UnknownPath,
+    find,
+    format_find,
+    format_importers,
+    format_tests,
+    importers_of,
+    load_artifacts,
+    resolve_path,
+    tests_of,
+)
 from .render.html import write_html
 from .render.terminal import render_tree
 from .scanner import scan_project
@@ -34,9 +49,16 @@ def main(argv: list[str] | None = None) -> int:
     batch = len(targets) > 1 or bool(args.root)
     if batch and args.html:
         parser.error("--html writes a single file; use --artifacts to map several projects")
+    querying = args.find is not None or args.importers is not None or args.tests is not None
+    if querying and batch:
+        parser.error("--find, --importers and --tests read one project's artifacts; give a single path")
+    if args.limit is not None and args.limit < 0:
+        parser.error("--limit must be 0 (no limit) or more")
 
     if args.check:
         return _check_all(targets, batch)
+    if querying:
+        return _query(targets[0], args)
 
     json_batch: list[dict[str, object]] | None = [] if batch and args.json else None
     failures: list[Path] = []
@@ -115,6 +137,25 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--only", help="Comma-separated extensions to include, such as py,js,ts.")
     parser.add_argument("--exclude", help="Comma-separated path substrings to exclude.")
+    queries = parser.add_mutually_exclusive_group()
+    queries.add_argument(
+        "--find",
+        metavar="WORDS",
+        help="Rank files by path and symbol names matching WORDS, from existing artifacts (no rescan).",
+    )
+    queries.add_argument(
+        "--importers", metavar="FILE", help="List the files that import FILE, from existing artifacts."
+    )
+    queries.add_argument(
+        "--tests", metavar="FILE", help="List the tests that import FILE or are named after it."
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        metavar="N",
+        help=f"Rows to show for a query (default {FIND_DEFAULT_LIMIT} for --find, "
+        f"{LIST_DEFAULT_LIMIT} otherwise; 0 for all).",
+    )
     return parser
 
 
@@ -148,6 +189,52 @@ def _check_all(targets: list[Path], batch: bool) -> int:
         print(f"{root}: {message}" if batch else message)
         worst = max(worst, code)
     return worst
+
+
+def _query(root: Path, args: argparse.Namespace) -> int:
+    """Answer --find / --importers / --tests from root's artifacts: 0 answered, 2 cannot."""
+    code, message = check_artifacts(root)
+    if code == 2:
+        print(message, file=sys.stderr)
+        return 2
+    if code == 1:
+        print(f"Note: {message}", file=sys.stderr)
+    try:
+        artifacts = load_artifacts(root)
+    except ArtifactsMissing as exc:
+        print(exc, file=sys.stderr)
+        return 2
+
+    if args.find is not None:
+        limit = FIND_DEFAULT_LIMIT if args.limit is None else args.limit
+        hits = find(artifacts, args.find)
+        if args.json:
+            print(json.dumps([{**asdict(hit), "is_hub": hit.is_hub} for hit in hits[: limit or None]], indent=2))
+        else:
+            print("\n".join(format_find(artifacts, args.find, hits, limit)))
+        return 0
+
+    limit = LIST_DEFAULT_LIMIT if args.limit is None else args.limit
+    try:
+        path = resolve_path(artifacts, args.importers or args.tests, Path.cwd())
+    except UnknownPath as exc:
+        print(exc, file=sys.stderr)
+        for candidate in exc.candidates[:LIST_DEFAULT_LIMIT]:
+            print(f"  {candidate}", file=sys.stderr)
+        return 2
+    if args.importers is not None:
+        pairs = importers_of(artifacts, path)
+        if args.json:
+            print(json.dumps({"path": path, "importers": [{"source": s, "raw": r} for s, r in pairs]}, indent=2))
+        else:
+            print("\n".join(format_importers(artifacts, path, pairs, limit)))
+        return 0
+    tests = tests_of(artifacts, path)
+    if args.json:
+        print(json.dumps({"path": path, "tested_by": tests}, indent=2))
+    else:
+        print("\n".join(format_tests(artifacts, path, tests, limit)))
+    return 0
 
 
 def _map_project(root: Path, args: argparse.Namespace, json_batch: list[dict[str, object]] | None) -> None:

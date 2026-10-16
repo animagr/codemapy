@@ -148,6 +148,16 @@ def extract_module_facts(file: FileNode) -> ModuleFacts:
     return ModuleFacts(symbols=_query_symbols(file.absolute_path, pack_name, query_source))
 
 
+def symbol_source_for_ext(ext: str) -> str | None:
+    """How symbols are extracted for files with *ext*: "ast", "tree-sitter", or None."""
+    if ext.lower() == ".py":
+        return "ast"
+    pack_name = pack_name_for_ext(ext)
+    if not backend.AVAILABLE or pack_name is None:
+        return None
+    return "tree-sitter" if _QUERY_ALIASES.get(pack_name, pack_name) in _SYMBOL_QUERIES else None
+
+
 @dataclass
 class _ProtoSymbol:
     """A captured definition with its full span, before nesting."""

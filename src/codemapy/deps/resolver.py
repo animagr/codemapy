@@ -35,6 +35,8 @@ VERILOG_LANGUAGES = {"Verilog", "Verilog Header", "SystemVerilog", "SystemVerilo
 VERILOG_EXTENSIONS = (".v", ".vh", ".sv", ".svh")
 C_LANGUAGES = {"C", "C Header", "C/C++ Header", "C++", "C++ Header"}
 C_INCLUDE_DIRS = ("include", "inc", "includes", "Config", "config", "utils", "src")
+GO_MOD = "go.mod"
+GO_TEST_SUFFIX = "_test.go"
 RUST_ROOT_FILES = ("lib.rs", "main.rs")
 GODOT_RESOURCE_EXTENSIONS = (".gd", ".tscn", ".scn", ".tres", ".res", ".theme")
 
@@ -54,6 +56,8 @@ class ImportResolver:
         self.csharp_namespaces = self._build_csharp_namespace_index(files)
         self.csharp_types = self._build_csharp_type_index(files)
         self._csharp_token_cache: dict[str, frozenset[str]] = {}
+        self.go_modules = self._build_go_modules(files)
+        self.go_packages = self._build_go_packages(files)
         self.last_candidates: list[str] = []
 
     def resolve(self, source: FileNode, ref: ImportRef) -> tuple[str, ...]:
@@ -69,8 +73,54 @@ class ImportResolver:
             return self._resolve_csharp(source, ref)
         if source.language == "Python":
             return self._resolve_python_import(source, ref)
+        if source.language == "Go":
+            return self._resolve_go(source, ref)
         target = self._resolve_single(source, ref)
         return (target,) if target else ()
+
+    def _resolve_go(self, source: FileNode, ref: ImportRef) -> tuple[str, ...]:
+        """Resolve a Go import to every non-test file of the imported package.
+
+        A Go import names a package (a folder), and all of its files compile
+        together, so each one is a dependency. The folder comes from the
+        longest matching ``module`` path among the repo's ``go.mod`` files, or
+        from a relative path. Anything else (the standard library, other
+        modules) is external.
+        """
+        if ref.raw.startswith(("./", "../")):
+            directory = _posix_dir(posixpath.join(posixpath.dirname(source.path), ref.raw))
+        else:
+            directory = self._go_package_dir(ref.raw)
+            if directory is None:
+                return ()
+        targets = tuple(path for path in self.go_packages.get(directory, ()) if path != source.path)
+        if not targets:
+            # Nothing mapped: list what is on disk so a skipped folder can be named.
+            self.last_candidates.extend(self._go_files_on_disk(directory))
+        return targets
+
+    def _go_package_dir(self, import_path: str) -> str | None:
+        matches = [
+            module
+            for module in self.go_modules
+            if import_path == module or import_path.startswith(f"{module}/")
+        ]
+        if not matches:
+            return None
+        module = max(matches, key=len)
+        remainder = import_path[len(module) :].lstrip("/")
+        return _posix_dir(posixpath.join(self.go_modules[module], remainder))
+
+    def _go_files_on_disk(self, directory: str) -> list[str]:
+        try:
+            names = sorted(entry.name for entry in (self.root / directory).iterdir() if entry.is_file())
+        except OSError:
+            return []
+        return [
+            posixpath.join(directory, name)
+            for name in names
+            if name.endswith(".go") and not name.endswith(GO_TEST_SUFFIX)
+        ]
 
     def _resolve_single(self, source: FileNode, ref: ImportRef) -> str | None:
         if source.language in {"JavaScript", "TypeScript", "Svelte"}:
@@ -451,6 +501,33 @@ class ImportResolver:
             for crate_name, roots in roots_by_name.items()
         }
 
+    def _build_go_modules(self, files: tuple[FileNode, ...]) -> dict[str, str]:
+        """Module path -> module root folder, for every go.mod above a Go file.
+
+        A repo can hold several modules (codemap keeps fixture modules under
+        testdata/), so each Go file's folder and its ancestors are checked.
+        Nearer roots win when two go.mod files declare the same module path.
+        """
+        folders: set[str] = set()
+        for file in files:
+            if file.language != "Go":
+                continue
+            parts = Path(file.path).parent.parts
+            folders.update("/".join(parts[:depth]) for depth in range(len(parts) + 1))
+        modules: dict[str, str] = {}
+        for folder in sorted(folders, key=lambda item: (-item.count("/"), item)):
+            module = _go_module_path(self.root / folder / GO_MOD)
+            if module:
+                modules.setdefault(module, folder)
+        return modules
+
+    def _build_go_packages(self, files: tuple[FileNode, ...]) -> dict[str, tuple[str, ...]]:
+        packages: dict[str, list[str]] = {}
+        for file in files:
+            if file.language == "Go" and not file.path.endswith(GO_TEST_SUFFIX):
+                packages.setdefault(_posix_dir(posixpath.dirname(file.path)), []).append(file.path)
+        return {folder: tuple(sorted(paths)) for folder, paths in packages.items()}
+
     def _build_gdscript_class_index(self, files: tuple[FileNode, ...]) -> dict[str, tuple[str, ...]]:
         classes: dict[str, list[str]] = {}
         for file in files:
@@ -524,6 +601,25 @@ class ImportResolver:
                 if _path_is_relative_to(source_path, root):
                     return root
         return source_path.parent
+
+
+def _posix_dir(path: str) -> str:
+    """Normalize a project-relative folder path; the root is ``""``."""
+    normalized = posixpath.normpath(path) if path else ""
+    return "" if normalized == "." else normalized
+
+
+def _go_module_path(go_mod: Path) -> str | None:
+    """The ``module`` path declared in a go.mod file, or None."""
+    try:
+        lines = go_mod.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        stripped = line.split("//", 1)[0].strip()
+        if stripped.startswith("module "):
+            return stripped.removeprefix("module ").strip().strip('"`') or None
+    return None
 
 
 def _verilog_source_rank(path: str) -> tuple[int, str]:

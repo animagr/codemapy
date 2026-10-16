@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-10-16
+
+### Added
+
+- Go import resolution. A new extractor (tree-sitter, with a regex fallback) reads `import` lines, and the resolver maps an import to a package folder through the module paths declared in the repo's `go.mod` files (nested modules included, the longest module path wins), or through a relative path. Every non-test file of the imported package becomes a dependency, because a Go package compiles as one unit; imports outside the repo's modules (the standard library, other modules) stay external. codemap went from 22 internal edges to 2,163. `go.mod` and `go.work` are listed as project metadata.
+- Hub lists show a Go package as one row (`scanner/ (package, 18 files)`) counting importers from outside the package, instead of one identical row per file. `summary.md`, `report.html`, and the GUI use the shared ranking, and `hubs.json` gains `top_hubs` in that form.
+- Per-file test coverage: each module in `context.json` records `tested_by`, the test files that import it or are named after it (`foo_test.go` -> `foo.go`, `__tests__/foo.test.ts` -> `foo.ts`, `src/test/.../FooTest.java` -> `src/main/.../Foo.java`, `spec/x_spec.rb` -> `app/x.rb`). A new **Test Coverage** section in `summary.md` gives the share of production modules with a direct test and lists the top hubs without one, and `report.html` shows each file's tests.
+- A **Coverage** section in `summary.md` (and a `coverage` block in `context.json`) states what the map can and cannot see: per language, the file count, whether imports become edges, and how symbols are extracted; that a 0 fan-in in an unanalysed language means "not analysed", not "unused"; what the scan skipped, counted by reason; and whether the tree-sitter backend and exact `.gitignore` matching were available.
+- Query mode, answering from the existing artifacts without rescanning: `--find WORDS` ranks files by BM25 over path and symbol-name words (an exact stem or symbol name adds a bonus; tests and generated files count half) and lists matching symbols, importer counts and hub status; `--importers FILE` lists the files that import FILE, production first; `--tests FILE` lists the tests covering FILE. FILE may be a unique trailing part such as `queries.ts`. `--limit N` bounds the rows and `--json` gives machine-readable output. Each answer names the commit and time the artifacts came from, a stale folder adds a note on stderr, and a missing one exits with code 2.
+
 ## [0.2.0] - 2026-10-16
 
 ### Added
@@ -174,6 +184,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Suppressed scanned-project Python `SyntaxWarning` messages during import extraction.
 - Fixed dependency graph resolution for nested include-style paths across supported languages.
 
+[0.2.1]: https://github.com/animagr/codemapy/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/animagr/codemapy/compare/v0.1.9...v0.2.0
 [0.1.9]: https://github.com/animagr/codemapy/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/animagr/codemapy/compare/v0.1.7...v0.1.8

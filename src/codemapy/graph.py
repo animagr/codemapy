@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import posixpath
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 
 from .deps.registry import extractor_for_ext
@@ -16,7 +18,7 @@ from .models import (
     ScanResult,
     UnresolvedImport,
 )
-from .testfiles import is_test_file
+from .testfiles import is_test_file, subject_candidates
 from .unresolved import UnresolvedClassifier, unresolved_warnings
 
 # Edge kinds that express containment/declaration rather than a true dependency.
@@ -37,7 +39,7 @@ def build_report(root: Path, files: ScanResult | tuple[FileNode, ...]) -> Report
     scan = files if isinstance(files, ScanResult) else ScanResult(sources=tuple(files))
     files = scan.sources
     resolver = ImportResolver(root, files)
-    classifier = UnresolvedClassifier(root, files, scan.skipped)
+    classifier = UnresolvedClassifier(root, files, scan.skipped, go_modules=resolver.go_modules)
     imports_by_file: dict[str, tuple[ImportRef, ...]] = {}
     facts_by_file = {}
     edges: list[Edge] = []
@@ -79,6 +81,7 @@ def build_report(root: Path, files: ScanResult | tuple[FileNode, ...]) -> Report
         in_neighbours.setdefault(edge.target, set()).add(edge.source)
 
     test_paths = {file.path for file in files if is_test_file(file.path, imports_by_file[file.path])}
+    tested_by = _tested_by(edges, test_paths, {file.path for file in files})
     modules = tuple(
         ModuleNode(
             path=file.path,
@@ -93,6 +96,7 @@ def build_report(root: Path, files: ScanResult | tuple[FileNode, ...]) -> Report
             is_test=file.path in test_paths,
             is_generated=file.is_generated,
             test_fan_in=len(in_neighbours.get(file.path, set()) & test_paths),
+            tested_by=tuple(sorted(tested_by.get(file.path, ()))),
         )
         for file in files
     )
@@ -111,7 +115,27 @@ def build_report(root: Path, files: ScanResult | tuple[FileNode, ...]) -> Report
         doc_files=scan.doc_files,
         asset_groups=scan.asset_groups,
         unresolved_imports=tuple(unresolved),
+        skipped=scan.skipped,
     )
+
+
+def _tested_by(edges: list[Edge], test_paths: set[str], paths: set[str]) -> dict[str, set[str]]:
+    """Map each non-test file to the tests that cover it directly.
+
+    A test covers a file it imports, and the file it is named after
+    (``subject_candidates``): Go tests in the same package and JVM tests in a
+    mirrored tree never import their subject.
+    """
+    tested_by: dict[str, set[str]] = {}
+    for edge in edges:
+        if edge.source in test_paths and edge.target not in test_paths and edge.source != edge.target:
+            tested_by.setdefault(edge.target, set()).add(edge.source)
+    for test in test_paths:
+        for subject in subject_candidates(test):
+            if subject in paths and subject not in test_paths:
+                tested_by.setdefault(subject, set()).add(test)
+                break
+    return tested_by
 
 
 def hub_rank_key(module: ModuleNode) -> tuple[int, int, int, int, str]:
@@ -211,3 +235,94 @@ def _strongly_connected_components(adjacency: dict[str, set[str]]) -> list[list[
                 components.append(component)
 
     return components
+
+
+# Languages whose imports name a package folder rather than a file. Every
+# file of such a package gets the same importers, so hub lists show the
+# package once instead of each of its files.
+PACKAGE_LANGUAGES = frozenset({"Go"})
+
+
+@dataclass(frozen=True)
+class HubEntry:
+    """One row of a hub list: a single file, or a whole package folder.
+
+    ``path`` is set for a single file; a package row has ``label`` ending in
+    "/" and counts importers from outside the package only. ``tested`` says
+    whether a test covers the file (or any file of the package) directly.
+    """
+
+    label: str
+    path: str | None
+    files: int
+    fan_in: int
+    test_fan_in: int
+    fan_out: int
+    loc: int
+    tested: bool = False
+
+    @property
+    def non_test_fan_in(self) -> int:
+        return self.fan_in - self.test_fan_in
+
+
+def hub_entries(report: Report) -> list[HubEntry]:
+    """Production hubs, best first, with package-language files grouped by folder."""
+    candidates = production_hubs(report.modules)
+    entries = [
+        HubEntry(
+            label=module.path,
+            path=module.path,
+            files=1,
+            fan_in=module.fan_in,
+            test_fan_in=module.test_fan_in,
+            fan_out=module.fan_out,
+            loc=module.loc,
+            tested=bool(module.tested_by),
+        )
+        for module in candidates
+        if module.language not in PACKAGE_LANGUAGES
+    ]
+    entries.extend(_package_entries(report, [m for m in candidates if m.language in PACKAGE_LANGUAGES]))
+    return sorted(
+        entries,
+        key=lambda entry: (-entry.non_test_fan_in, -entry.fan_in, -entry.fan_out, -entry.loc, entry.label),
+    )
+
+
+def _package_entries(report: Report, modules: list[ModuleNode]) -> list[HubEntry]:
+    folder_of = {module.path: posixpath.dirname(module.path) for module in modules}
+    if not folder_of:
+        return []
+    test_paths = {module.path for module in report.modules if module.is_test}
+    package_paths = {module.path for module in report.modules if module.language in PACKAGE_LANGUAGES}
+    importers: dict[str, set[str]] = {}
+    imported: dict[str, set[str]] = {}
+    for edge in report.edges:
+        target_folder = folder_of.get(edge.target)
+        if target_folder is not None and posixpath.dirname(edge.source) != target_folder:
+            importers.setdefault(target_folder, set()).add(edge.source)
+        source_folder = folder_of.get(edge.source)
+        if source_folder is not None and posixpath.dirname(edge.target) != source_folder:
+            # An imported package counts once, however many files it has.
+            target = posixpath.dirname(edge.target) + "/" if edge.target in package_paths else edge.target
+            imported.setdefault(source_folder, set()).add(target)
+    members: dict[str, list[ModuleNode]] = {}
+    for module in modules:
+        members.setdefault(folder_of[module.path], []).append(module)
+    entries = []
+    for folder, group in members.items():
+        sources = importers.get(folder, set())
+        entries.append(
+            HubEntry(
+                label=f"{folder}/" if folder else "./",
+                path=group[0].path if len(group) == 1 else None,
+                files=len(group),
+                fan_in=len(sources),
+                test_fan_in=len(sources & test_paths),
+                fan_out=len(imported.get(folder, set())),
+                loc=sum(module.loc for module in group),
+                tested=any(module.tested_by for module in group),
+            )
+        )
+    return entries

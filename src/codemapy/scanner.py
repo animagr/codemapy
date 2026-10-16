@@ -121,6 +121,11 @@ def scan_project(root: Path, config: Config) -> ScanResult:
     )
 
 
+def gitignore_matching() -> str:
+    """"exact" with pathspec installed, "approximate" with the fnmatch fallback."""
+    return "exact" if _pathspec is not None else "approximate"
+
+
 def build_tree(files: tuple[FileNode, ...]) -> TreeNode:
     root = TreeNode(name="", path="")
     for file in files:

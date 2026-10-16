@@ -5,12 +5,14 @@ import json
 from pathlib import Path
 
 from codemapy.entrypoints import entry_points
+from codemapy.graph import hub_entries
 from codemapy.models import ModuleNode, Report
 from codemapy.unresolved import describe_group, group_unresolved, reason_value
 
 # Top-level symbols embedded per file for the details panel. Full nested
 # detail lives in symbols.json; the report only needs a browsable outline.
 MAX_HTML_SYMBOLS_PER_FILE = 50
+MAX_HTML_HUBS = 10
 
 
 def write_html(report: Report, output: Path) -> Path:
@@ -297,12 +299,8 @@ function renderEntryPoints() {{
 function renderHubs() {{
   const list = document.getElementById("hubList");
   list.innerHTML = "";
-  // Same ranking as summary.md: production modules by non-test fan-in.
-  const prodIn = module => module.fan_in - module.test_fan_in;
-  const hubs = report.modules
-    .filter(module => (module.fan_in || module.fan_out) && !module.is_test && !module.is_generated)
-    .sort((a, b) => prodIn(b) - prodIn(a) || b.fan_in - a.fan_in || b.fan_out - a.fan_out || a.path.localeCompare(b.path))
-    .slice(0, 10);
+  // Rows come ranked from Python (graph.hub_entries), as in summary.md.
+  const hubs = report.hubs;
   if (!hubs.length) {{
     const note = report.edges.length
       ? `None: all ${{report.edges.length}} internal dependency edges are between test or generated files`
@@ -310,9 +308,10 @@ function renderHubs() {{
     list.appendChild(li(subtle(note)));
     return;
   }}
-  hubs.forEach(module => {{
-    const tests = module.test_fan_in ? ` (${{module.test_fan_in}} from tests)` : "";
-    list.appendChild(li(fileLink(module.path), " ", subtle(`in ${{module.fan_in}}${{tests}} · out ${{module.fan_out}}`)));
+  hubs.forEach(hub => {{
+    const tests = hub.test_fan_in ? ` (${{hub.test_fan_in}} from tests)` : "";
+    const files = hub.path ? "" : ` · ${{hub.files}} files`;
+    list.appendChild(li(fileLink(hub.path || hub.label, hub.label), " ", subtle(`in ${{hub.fan_in}}${{tests}} · out ${{hub.fan_out}}${{files}}`)));
   }});
 }}
 
@@ -375,6 +374,7 @@ function renderDetails() {{
   const unresolved = report.unresolved.filter(item => item.source === selected);
   appendLinkList(panel, "Depends on", [...new Set(outgoing)]);
   appendLinkList(panel, "Used by", [...new Set(incoming)]);
+  if (module) appendLinkList(panel, "Tested by", module.tested_by);
   if (unresolved.length) {{
     appendHeading(panel, `Unresolved imports (${{unresolved.length}})`);
     const list = document.createElement("ul");
@@ -553,6 +553,7 @@ def _report_payload(report: Report) -> dict[str, object]:
                 "test_fan_in": module.test_fan_in,
                 "is_test": module.is_test,
                 "is_generated": module.is_generated,
+                "tested_by": list(module.tested_by),
                 "symbols": _symbol_outline(module),
                 "symbols_omitted": max(0, len(module.symbols) - MAX_HTML_SYMBOLS_PER_FILE),
                 "symbol_count": sum(len(symbol.flatten()) for symbol in module.symbols),
@@ -580,6 +581,17 @@ def _report_payload(report: Report) -> dict[str, object]:
         # Markdown backticks are dropped: the panel renders plain text.
         "unresolved_groups": [
             describe_group(group).replace("`", "") for group in group_unresolved(report.unresolved_imports)
+        ],
+        "hubs": [
+            {
+                "label": hub.label,
+                "path": hub.path,
+                "files": hub.files,
+                "fan_in": hub.fan_in,
+                "test_fan_in": hub.test_fan_in,
+                "fan_out": hub.fan_out,
+            }
+            for hub in hub_entries(report)[:MAX_HTML_HUBS]
         ],
         "entry_points": [
             {"name": entry.name, "target": entry.target, "path": entry.path, "note": entry.note}

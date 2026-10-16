@@ -9,7 +9,8 @@ from pathlib import Path
 from codemapy import gitinfo
 from codemapy.config import load_config
 from codemapy.entrypoints import entry_points
-from codemapy.graph import hub_rank_key, production_hubs
+from codemapy.coverage import coverage_lines, coverage_payload
+from codemapy.graph import HubEntry, hub_entries, hub_rank_key, production_hubs
 from codemapy.models import AuxFile, ModuleNode, Report, Symbol, UnresolvedImport
 from codemapy.render.html import write_html
 from codemapy.scanner import scan_project
@@ -188,6 +189,8 @@ def report_payload(report: Report) -> dict[str, object]:
                 # Importers that are test files; fan_in - test_fan_in is what
                 # production code depends on, and what hubs are ranked by.
                 "test_fan_in": module.test_fan_in,
+                # Tests that import this module or are named after it.
+                "tested_by": list(module.tested_by),
             }
             for module in report.modules
         ],
@@ -201,6 +204,7 @@ def report_payload(report: Report) -> dict[str, object]:
         ],
         "unresolved_imports": [_unresolved_payload(item) for item in report.unresolved_imports],
         "cycles": [list(cycle) for cycle in report.cycles],
+        "coverage": coverage_payload(report),
         "warnings": list(report.warnings),
     }
 
@@ -308,6 +312,21 @@ def hubs_payload(report: Report) -> dict[str, object]:
             )
             if module.fan_out
         ][:MAX_TOP_HUBS],
+        # Like top_fan_in, but a Go package is one row rather than one row per file.
+        "top_hubs": [_hub_payload(hub) for hub in hub_entries(report)[:MAX_TOP_HUBS]],
+    }
+
+
+def _hub_payload(hub: HubEntry) -> dict[str, object]:
+    return {
+        "label": hub.label,
+        "path": hub.path,
+        "files": hub.files,
+        "fan_in": hub.fan_in,
+        "test_fan_in": hub.test_fan_in,
+        "fan_out": hub.fan_out,
+        "loc": hub.loc,
+        "tested": hub.tested,
     }
 
 
@@ -419,6 +438,9 @@ def summary_markdown(
     else:
         lines.append("- None detected")
 
+    lines.extend(["", "## Coverage", ""])
+    lines.extend(coverage_lines(report))
+
     lines.extend(["", "## Directory Overview", ""])
     lines.extend(_directory_overview(report))
 
@@ -428,6 +450,9 @@ def summary_markdown(
 
     lines.extend(["", "## Top Hubs", ""])
     lines.extend(_hub_lines(report))
+
+    lines.extend(["", "## Test Coverage", ""])
+    lines.extend(_test_coverage_lines(report))
 
     lines.extend(["", "## Largest Files", ""])
     largest = sorted(report.files, key=lambda file: (-file.loc, file.path))[:10]
@@ -487,9 +512,13 @@ def summary_markdown(
             "## Artifact Guide",
             "",
             "- `context.json`: full scan data - files, imports, dependency edges, unresolved internal imports "
-            "with their reasons, cycles, per-file symbol counts, and test / generated flags",
+            "with their reasons, cycles, per-file symbol counts, test / generated flags, `tested_by` "
+            "(the tests covering each module), and a `coverage` block",
             "- `symbols.json`: per-file definitions plus an `index` mapping each defined name to its locations",
-            "- `hubs.json`: modules ranked by non-test fan-in and by fan-out",
+            "- `hubs.json`: modules ranked by non-test fan-in and by fan-out, plus `top_hubs` with Go "
+            "packages grouped",
+            "- Query without reading these files: `codemapy --find WORDS`, `--importers FILE`, "
+            "`--tests FILE`",
             "- `manifest.json`: generation metadata, artifact byte sizes, and `git_commit` for staleness checks",
             "- `report.html`: visual file tree, treemap, dependency graph, and insights "
             "(entry points, hubs, cycles, per-file symbols) for humans",
@@ -583,7 +612,7 @@ MAX_GENERATED_FILES = 15
 
 
 def _hub_lines(report: Report) -> list[str]:
-    hubs = production_hubs(report.modules)[:MAX_SUMMARY_HUBS]
+    hubs = hub_entries(report)[:MAX_SUMMARY_HUBS]
     if not hubs and report.edges:
         edges = "the only internal dependency edge is" if len(report.edges) == 1 else (
             f"all {len(report.edges)} internal dependency edges are"
@@ -591,13 +620,37 @@ def _hub_lines(report: Report) -> list[str]:
         return [f"- None: {edges} between test or generated files"]
     if not hubs:
         return ["- No internal dependency edges detected"]
-    lines = []
-    for module in hubs:
-        tests_note = f" ({module.test_fan_in} from tests)" if module.test_fan_in else ""
-        lines.append(
-            f"- `{module.path}`: fan-in {module.fan_in}{tests_note}, "
-            f"fan-out {module.fan_out}, {module.loc} loc"
-        )
+    return [f"- {_hub_text(hub)}" for hub in hubs]
+
+
+def _hub_text(hub: HubEntry) -> str:
+    tests_note = f" ({hub.test_fan_in} from tests)" if hub.test_fan_in else ""
+    package_note = f" (package, {_count_files(hub.files)})" if hub.path is None or hub.label.endswith("/") else ""
+    return (
+        f"`{hub.label}`{package_note}: fan-in {hub.fan_in}{tests_note}, "
+        f"fan-out {hub.fan_out}, {hub.loc} loc"
+    )
+
+
+MAX_UNTESTED_HUBS = 10
+
+
+def _test_coverage_lines(report: Report) -> list[str]:
+    """Direct test coverage of production modules, and the hubs that lack it."""
+    production = [module for module in report.modules if not module.is_test and not module.is_generated]
+    if not any(module.is_test for module in report.modules):
+        return ["- No test files detected, so no module has a direct test"]
+    covered = sum(1 for module in production if module.tested_by)
+    share = round(100 * covered / len(production)) if production else 0
+    lines = [
+        f"- {covered} of {len(production)} production modules ({share}%) have a direct test: "
+        "a test file imports them or is named after them (`foo_test.go`, `foo.test.ts`, "
+        "`src/test/.../FooTest.java`). A module reached only through other modules is not counted.",
+    ]
+    untested = [hub for hub in hub_entries(report) if not hub.tested][:MAX_UNTESTED_HUBS]
+    if untested:
+        lines.append("- Hubs without a direct test:")
+        lines.extend(f"  - {_hub_text(hub)}" for hub in untested)
     return lines
 
 
