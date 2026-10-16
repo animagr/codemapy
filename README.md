@@ -60,14 +60,14 @@ Planned dependency graph support: Bash, Go, Java, and Ruby (these currently have
 ## Usage
 
 ```bash
-python -m codemapy <path>
-python -m codemapy <path> --artifacts
-python -m codemapy <path> --artifacts --yes
-python -m codemapy <path> --json
-python -m codemapy <path> --open
-python -m codemapy <path> --check
-python -m codemapy <path1> <path2> <path3> --artifacts
-python -m codemapy --root <dir> --artifacts --yes
+py -3.14 -m codemapy <path>
+py -3.14 -m codemapy <path> --artifacts
+py -3.14 -m codemapy <path> --artifacts --yes
+py -3.14 -m codemapy <path> --json
+py -3.14 -m codemapy <path> --open
+py -3.14 -m codemapy <path> --check
+py -3.14 -m codemapy <path1> <path2> <path3> --artifacts
+py -3.14 -m codemapy --root <dir> --artifacts --yes
 ```
 
 ### Mapping several projects
