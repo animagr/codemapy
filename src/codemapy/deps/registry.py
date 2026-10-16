@@ -5,6 +5,7 @@ from codemapy.deps.c import CExtractor
 from codemapy.deps.csharp import CSharpExtractor
 from codemapy.deps.gdscript import GDScriptExtractor
 from codemapy.deps.go import GoExtractor
+from codemapy.deps.java import JavaExtractor
 from codemapy.deps.javascript import JavaScriptExtractor
 from codemapy.deps.lua import LuaExtractor
 from codemapy.deps.python import PythonExtractor
@@ -44,6 +45,7 @@ EXTRACTORS_BY_EXT: dict[str, DependencyExtractor] = {
     ".svelte": _javascript_regex,
     ".gd": _gdscript,
     ".go": _go,
+    ".java": JavaExtractor(),
     ".lua": _lua,
     ".rs": _rust,
     ".v": _verilog,

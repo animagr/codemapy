@@ -46,8 +46,9 @@ Everything flows through frozen dataclasses defined in `models.py`.
 4. The resulting `Report` feeds three outputs:
    - `render/terminal.py`.
    - `render/html.py`: one self-contained HTML string with inline CSS and JS, built directly in Python with no template engine.
-   - `artifacts.py`: writes `.codemapy/`, using `entrypoints.py`, `coverage.py` (the Coverage section and `coverage` block), and `gitinfo.py`.
-5. `query.py` answers `--find` / `--importers` / `--tests` from an existing `.codemapy/` folder without rescanning. It only reads `context.json`, `symbols.json`, and `manifest.json`, so a field it needs must be in those files.
+   - `artifacts.py`: writes `.codemapy/`, using `entrypoints.py`, `coverage.py` (the Coverage section and `coverage` block), `stack.py` (declared dependencies and frameworks), `unused.py` (possibly unused modules), and `gitinfo.py`.
+5. Queries answer from an existing `.codemapy/` folder without rescanning. `query.py` loads it (`Artifacts`) and answers `--find` / `--importers` / `--tests`. `symbol_queries.py` answers `--where` / `--outline`, `impact.py` answers `--impact` / `--changed`, and `why.py` answers `--why`. They only read `context.json`, `symbols.json`, and `manifest.json`, so a field a query needs must be written there (`skipped` exists for `--why`).
+   - `artifacts.changed_since_artifacts` is the one notion of "changed since the map was written": files git reports changed since the recorded commit and modified after generation, or deleted. `--check`, the query notes, and the `[changed]` row markers all use it.
 
 ### Imports and symbols are separate mechanisms (on purpose)
 
@@ -69,8 +70,9 @@ Everything flows through frozen dataclasses defined in `models.py`.
 - Go is many-valued: an import names a package folder (found through the module paths of every `go.mod` above a Go file, longest match wins), and every non-test `.go` file in it is a target. When nothing is mapped there, `_resolve_go` lists the folder's files on disk as `last_candidates`, so a skipped folder can still be named.
 - Python is many-valued for `from X import a, b`. The extractor records the imported names in `ImportRef.names`, and `_resolve_python_import` links `X` itself plus each name that is a submodule file of `X`. Namespace packages (no `__init__.py`) resolve only through their submodules.
 - C# is many-valued, because a `using` names a namespace rather than a file. Resolution matches the exact namespace (not sub-namespaces) and keeps only files whose declared types the source actually mentions. It also drops namespaces that fan out to more than `CSHARP_NAMESPACE_FANOUT_CAP` files.
-- `DECLARATION_EDGE_KINDS` (`rust-mod`) count toward fan-in and fan-out but are excluded from cycle detection. Without that, every `mod x;` + `use super::*` pair would form a fake 2-cycle.
-- `DROP_IF_UNRESOLVED_KINDS` (`gdscript-ident`) are speculative refs. They are dropped when they don't resolve, not reported as external.
+- `CYCLE_EXEMPT_EDGE_KINDS` (`rust-mod`, `java-package`) count toward fan-in and fan-out but are excluded from cycle detection. Without that, every `mod x;` + `use super::*` pair would form a fake 2-cycle, and every Java package would be one big cycle.
+- `DROP_IF_UNRESOLVED_KINDS` (`gdscript-ident`, `java-package`) are speculative refs. They are dropped when they don't resolve, not reported as external.
+- Java imports resolve through a fully-qualified-name index built from `package` declarations. A file's own package (`java-package`) links to the same-package classes whose names its source mentions, the same token filter C# `using` resolution uses.
 - A resolver that builds candidate paths must send them through `_first_existing`; otherwise `last_candidates` stays empty and imports into skipped folders pass as external. C# and the C basename search don't use it, which is fine because neither names a single file.
 - `unresolved.py` reports `missing` only for import shapes that can name nothing but a project file. Keep that list narrow: C/Verilog include paths, Lua `require`, and C# namespaces are routinely satisfied outside the repo.
 - Only `WARN_REASONS` print stderr warnings. Imports into built-in ignores (`vendor/`, `dist/`), `.gitignore`d paths, and build outputs are expected, so they are listed without a warning.

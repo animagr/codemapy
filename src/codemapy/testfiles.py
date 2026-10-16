@@ -94,7 +94,7 @@ def is_test_file(path: str, imports: Iterable[ImportRef] = ()) -> bool:
     test-like Python or C/C++ filename (see the module docstring); without
     them, those filenames alone do not make a file a test.
     """
-    if _in_test_directory(path):
+    if in_test_directory(path):
         return True
     if any(pattern.search(path) for pattern in _TEST_FILENAME_PATTERNS):
         return True
@@ -107,7 +107,8 @@ def is_test_file(path: str, imports: Iterable[ImportRef] = ()) -> bool:
     return False
 
 
-def _in_test_directory(path: str) -> bool:
+def in_test_directory(path: str) -> bool:
+    """True if a folder in *path* (not the file name) is a test folder."""
     for part in path.split("/")[:-1]:
         if part.lower() in TEST_DIRECTORY_NAMES:
             return True

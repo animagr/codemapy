@@ -21,25 +21,33 @@ from .models import (
 from .testfiles import is_test_file, subject_candidates
 from .unresolved import UnresolvedClassifier, unresolved_warnings
 
-# Edge kinds that express containment/declaration rather than a true dependency.
-# A Rust `mod child;` declaration paired with the idiomatic `use super::*` /
-# `use crate::...` in the child manufactures a 2-cycle for nearly every module,
-# which cascades into one giant, meaningless strongly-connected component. These
-# edges still count toward fan-in/fan-out, but are excluded from cycle analysis.
-DECLARATION_EDGE_KINDS = frozenset({"rust-mod"})
+# Edge kinds left out of cycle detection. They still count toward fan-in and
+# fan-out.
+# - `rust-mod`: a `mod child;` declaration paired with the idiomatic
+#   `use super::*` / `use crate::...` in the child manufactures a 2-cycle for
+#   nearly every module, which cascades into one giant, meaningless
+#   strongly-connected component.
+# - `java-package`: classes of one Java package use each other without
+#   imports, and mutual references inside a package are normal, not a design
+#   cycle. Cross-package import cycles are still found.
+CYCLE_EXEMPT_EDGE_KINDS = frozenset({"rust-mod", "java-package"})
 
-# Speculative reference kinds (e.g. GDScript PascalCase identifiers that might
-# name a `class_name` class or an autoload). When they resolve they are real
-# edges; when they don't they are usually engine builtins, so they are dropped
-# instead of being recorded as external references.
-DROP_IF_UNRESOLVED_KINDS = frozenset({"gdscript-ident"})
+# Speculative reference kinds. When they resolve they are real edges; when
+# they don't they are dropped instead of being recorded as external:
+# - `gdscript-ident`: PascalCase identifiers that might name a `class_name`
+#   class or an autoload, usually engine builtins when they don't resolve.
+# - `java-package`: a file's own package, linked to the same-package classes
+#   its source mentions; nothing mentioned means nothing to report.
+DROP_IF_UNRESOLVED_KINDS = frozenset({"gdscript-ident", "java-package"})
 
 
 def build_report(root: Path, files: ScanResult | tuple[FileNode, ...]) -> Report:
     scan = files if isinstance(files, ScanResult) else ScanResult(sources=tuple(files))
     files = scan.sources
     resolver = ImportResolver(root, files)
-    classifier = UnresolvedClassifier(root, files, scan.skipped, go_modules=resolver.go_modules)
+    classifier = UnresolvedClassifier(
+        root, files, scan.skipped, go_modules=resolver.go_modules, java_packages=resolver.java_packages
+    )
     imports_by_file: dict[str, tuple[ImportRef, ...]] = {}
     facts_by_file = {}
     edges: list[Edge] = []
@@ -61,6 +69,8 @@ def build_report(root: Path, files: ScanResult | tuple[FileNode, ...]) -> Report
                     edges.append(Edge(source=file.path, target=target, raw=ref.raw, kind=ref.kind))
             elif ref.kind in DROP_IF_UNRESOLVED_KINDS:
                 continue
+            elif resolver.resolved_to_self:
+                kept_refs.append(ref)
             else:
                 kept_refs.append(ref)
                 miss = classifier.classify(file, ref, resolver.last_candidates)
@@ -169,7 +179,7 @@ def find_cycles(edges: tuple[Edge, ...] | list[Edge]) -> tuple[tuple[str, ...], 
     adjacency: dict[str, set[str]] = {}
     self_loops: set[str] = set()
     for edge in edges:
-        if edge.kind in DECLARATION_EDGE_KINDS:
+        if edge.kind in CYCLE_EXEMPT_EDGE_KINDS:
             continue
         if edge.source == edge.target:
             self_loops.add(edge.source)

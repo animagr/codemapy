@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-10-16
+
+### Added
+
+- `--impact FILE` lists every file that depends on FILE, directly or through other files, grouped by distance, and the tests to run: every affected test file plus the tests recorded in `tested_by` for each changed or affected file. `--changed [REF]` does the same for every file `git diff` reports since REF (default: uncommitted changes against HEAD) and names changed files the map does not hold. This follows codemap's blast radius, made transitive.
+- `--where NAME` shows where a name (or `Class.member`) is defined: file, line range, kind, signature, the first docstring line, what it extends, and the classes that extend it. `--outline FILE` lists a file's definitions in source order with line ranges, signatures and docstring first lines, so an agent can see a file's structure without opening it.
+- Inheritance: symbols record `bases`, what a class extends or implements, in `symbols.json`. Python reads them from `ast` (keyword arguments such as `metaclass=` are left out); JavaScript, TypeScript, Java, C#, C++ and Ruby read them from new tree-sitter queries.
+- `--why FILE` explains why a file is or is not in the map: mapped (with its numbers), skipped (the rule, and the `.codemap.json` change that would map it), documentation or project metadata, an unmapped file type, missing, or added after the artifacts were written. `context.json` now lists the `skipped` folders and source files with their reasons.
+- A **Stack** section in `summary.md` (and `stack` in `context.json`): the declared dependencies of `pyproject.toml`, `requirements*.txt`, `package.json`, `Cargo.toml` and `go.mod` near the root, skipping manifests inside test fixtures, plus the well-known frameworks and tools among them (`PySide6 (Qt GUI)`, `PyVISA (instrument control)`, `React (UI)`, `Vitest (tests)`, ...).
+- A **Possibly Unused Modules** section in `summary.md` (and `possibly_unused` in `context.json`): files nothing in the map imports, limited to languages whose imports are analysed. Files loaded without an import are left out: entry points and runnable scripts, tests, generated files, files a manifest names (`package.json` `main`/`bin`, Cargo crate roots and `src/bin/`, `[project.scripts]`), package and crate roots, C/C++ and HDL compile units, config and worker files, framework route files, Java `package-info.java`, and folders of scripts, examples, docs or templates. A Go file counts only when its whole package is unused. JavaScript/TypeScript is left out, with the reason stated, when the project declares import path aliases or holds `.vue`, `.astro` or `.mdx` files.
+- Java import resolution. `import a.b.C` (and nested `a.b.C.Inner`, `import static`) resolves through a fully-qualified-name index built from `package` declarations, and `import a.b.*` links the package's classes the file mentions. Classes of the same package, which need no import, link by the class names the source mentions, the token filter C# `using` resolution already uses. Same-package edges are left out of cycle detection. An import inside the project's namespace that matches no file is reported as unresolved (logisim-evolution's build-generated `BuildInfo`). Digital went from 0 to 7,346 internal edges, logisim-evolution from 0 to 10,833.
+
+### Changed
+
+- `--check` names the files changed since the artifacts were written (up to 10): ones git reports changed since the recorded commit and modified after the artifacts were generated, or deleted. Artifacts written from a dirty working tree now read as fresh until something changes again, instead of always stale. Queries print the same note and mark rows for changed files `[changed]`.
+- `Debug`, `Release` and `Win32` are skipped only with that exact capitalisation (Visual Studio's output folders). Lowercase `release` and `debug` are common source package names: Digital's update checker in `gui/release/` was missing from its map.
+
 ## [0.2.1] - 2026-10-16
 
 ### Added
@@ -184,6 +201,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Suppressed scanned-project Python `SyntaxWarning` messages during import extraction.
 - Fixed dependency graph resolution for nested include-style paths across supported languages.
 
+[0.3.0]: https://github.com/animagr/codemapy/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/animagr/codemapy/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/animagr/codemapy/compare/v0.1.9...v0.2.0
 [0.1.9]: https://github.com/animagr/codemapy/compare/v0.1.8...v0.1.9

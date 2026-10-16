@@ -37,19 +37,21 @@ DEFAULT_IGNORES = {
     "codemapy-report.html",
     "coverage",
     "DerivedData",
-    "Debug",
     "dist",
     "grammars",
     "htmlcov",
     "node_modules",
     "Pods",
-    "Release",
     "target",
     "vendor",
     "venv",
-    "Win32",
     "x64",
 }
+
+# Visual Studio build output folders, matched with their exact capitalisation:
+# lowercase `debug` and `release` are common source package names (Digital
+# keeps its update checker in `gui/release/`).
+CASE_SENSITIVE_IGNORES = frozenset({"Debug", "Release", "Win32"})
 
 DEFAULT_IGNORE_DIR_PREFIXES = (
     "cmake-build-",
@@ -215,7 +217,8 @@ _GENERATED_FILE_SUFFIXES_LOWER = tuple(suffix.lower() for suffix in GENERATED_FI
 def is_default_ignored_dir_name(name: str) -> bool:
     normalized = name.lower()
     return (
-        normalized in _DEFAULT_IGNORES_LOWER
+        name in CASE_SENSITIVE_IGNORES
+        or normalized in _DEFAULT_IGNORES_LOWER
         or any(normalized.startswith(prefix.lower()) for prefix in DEFAULT_IGNORE_DIR_PREFIXES)
         or any(normalized.endswith(suffix.lower()) for suffix in DEFAULT_IGNORE_DIR_SUFFIXES)
     )

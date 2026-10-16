@@ -14,7 +14,9 @@ from codemapy.graph import HubEntry, hub_entries, hub_rank_key, production_hubs
 from codemapy.models import AuxFile, ModuleNode, Report, Symbol, UnresolvedImport
 from codemapy.render.html import write_html
 from codemapy.scanner import scan_project
+from codemapy.stack import Manifest, frameworks, read_stack
 from codemapy.unresolved import describe_group, group_unresolved, reason_value
+from codemapy.unused import possibly_unused
 
 
 ARTIFACT_DIR_NAME = ".codemapy"
@@ -85,7 +87,12 @@ def write_artifacts(report: Report, output_dir: Path | None = None) -> ArtifactP
 
 
 def check_artifacts(root: Path) -> tuple[int, str]:
-    """Return ``(exit_code, message)``: 0 fresh, 1 stale, 2 missing/unreadable."""
+    """Return ``(exit_code, message)``: 0 fresh, 1 stale, 2 missing/unreadable.
+
+    A stale message names the files that changed since the artifacts were
+    written (see ``changed_since_artifacts``), so an agent can tell whether
+    the files it is working on are affected.
+    """
     root = root.resolve()
     manifest_path = artifact_dir_for(root) / "manifest.json"
     if not manifest_path.exists():
@@ -98,16 +105,74 @@ def check_artifacts(root: Path) -> tuple[int, str]:
     recorded_commit = manifest.get("git_commit")
     current_commit = gitinfo.head_commit(root)
     if recorded_commit and current_commit:
+        changed = changed_since_artifacts(root, manifest)
+        changed_note = f"; {_changed_preview(changed)}" if changed else ""
         if recorded_commit != current_commit:
             return 1, (
-                f"Stale: HEAD moved from {recorded_commit[:12]} to {current_commit[:12]} "
+                f"Stale: HEAD moved from {recorded_commit[:12]} to {current_commit[:12]}{changed_note} "
                 "(refresh with --artifacts --yes)"
+            )
+        if manifest.get("git_dirty") and changed == []:
+            # Mapped from uncommitted edits, and nothing has changed since.
+            return 0, (
+                f"Fresh: no file changed since the artifacts were written from uncommitted changes on "
+                f"{current_commit[:12]}"
             )
         # Artifacts are never committed, so their own folder is not a change.
         if manifest.get("git_dirty") or gitinfo.is_dirty(root, ignored_dir_names=(ARTIFACT_DIR_NAME,)):
-            return 1, "Stale: the working tree has uncommitted changes (refresh with --artifacts --yes)"
+            return 1, f"Stale: the working tree has uncommitted changes{changed_note} (refresh with --artifacts --yes)"
         return 0, f"Fresh: artifacts match clean HEAD {current_commit[:12]}"
     return _check_by_mtime(root, manifest)
+
+
+MAX_CHANGED_PREVIEW = 10
+
+
+def changed_since_artifacts(root: Path, manifest: dict[str, object] | None = None) -> list[str] | None:
+    """Files changed since the artifacts in *root* were written, or None if unknown.
+
+    Uses git when the manifest recorded a commit: a file counts when git
+    reports it changed since that commit and it was modified after the
+    artifacts were generated, or deleted. Edits already present when a dirty
+    tree was mapped are therefore not counted. Outside git, mapped files
+    modified after generation are reported instead.
+    """
+    root = root.resolve()
+    if manifest is None:
+        try:
+            manifest = json.loads((artifact_dir_for(root) / "manifest.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+    try:
+        generated = datetime.fromisoformat(str(manifest.get("generated_at"))).timestamp()
+    except (TypeError, ValueError):
+        return None
+    commit = manifest.get("git_commit")
+    if commit and gitinfo.head_commit(root):
+        candidates = gitinfo.changed_files(root, since=str(commit), ignored_dir_names=(ARTIFACT_DIR_NAME,))
+        if candidates is None:
+            return None
+        return [path for path in candidates if _modified_after(root / path, generated)]
+    try:
+        context = json.loads((artifact_dir_for(root) / "context.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    mapped = [str(item["path"]) for item in context.get("files", [])]
+    return [path for path in mapped if _modified_after(root / path, generated)]
+
+
+def _modified_after(path: Path, timestamp: float) -> bool:
+    try:
+        return path.stat().st_mtime > timestamp
+    except OSError:
+        return True  # deleted since
+
+
+def _changed_preview(paths: list[str]) -> str:
+    noun = "file" if len(paths) == 1 else "files"
+    shown = ", ".join(paths[:MAX_CHANGED_PREVIEW])
+    more = f" and {len(paths) - MAX_CHANGED_PREVIEW} more" if len(paths) > MAX_CHANGED_PREVIEW else ""
+    return f"{len(paths)} {noun} changed since they were written: {shown}{more}"
 
 
 def _check_by_mtime(root: Path, manifest: dict[str, object]) -> tuple[int, str]:
@@ -117,16 +182,13 @@ def _check_by_mtime(root: Path, manifest: dict[str, object]) -> tuple[int, str]:
     except (TypeError, ValueError):
         return 1, "Stale: manifest has no git commit and no usable generated_at timestamp"
 
-    newest: tuple[float, str] | None = None
-    for file in scan_project(root, load_config(root)).sources:
-        try:
-            mtime = file.absolute_path.stat().st_mtime
-        except OSError:
-            continue
-        if newest is None or mtime > newest[0]:
-            newest = (mtime, file.path)
-    if newest and newest[0] > generated:
-        return 1, f"Stale: {newest[1]} was modified after the artifacts were generated"
+    newer = sorted(
+        file.path
+        for file in scan_project(root, load_config(root)).sources
+        if _modified_after(file.absolute_path, generated)
+    )
+    if newer:
+        return 1, f"Stale: {_changed_preview(newer)} (refresh with --artifacts --yes)"
     return 0, "Fresh: no source file modified since the artifacts were generated"
 
 
@@ -205,6 +267,14 @@ def report_payload(report: Report) -> dict[str, object]:
         "unresolved_imports": [_unresolved_payload(item) for item in report.unresolved_imports],
         "cycles": [list(cycle) for cycle in report.cycles],
         "coverage": coverage_payload(report),
+        "stack": _stack_payload(read_stack(report)),
+        # Files nothing imports that are not entry points, tests, generated or
+        # loaded by convention (see codemapy.unused): candidates, not verdicts.
+        "possibly_unused": [module.path for module in possibly_unused(report).modules],
+        # Pruned folders and dropped source files, with the reason (answers --why).
+        "skipped": [
+            {"path": item.path, "reason": item.reason.value, "is_dir": item.is_dir} for item in report.skipped
+        ],
         "warnings": list(report.warnings),
     }
 
@@ -276,6 +346,8 @@ def _symbol_payload(symbol: Symbol) -> dict[str, object]:
         payload["signature"] = symbol.signature
     if symbol.doc:
         payload["doc"] = symbol.doc
+    if symbol.bases:
+        payload["bases"] = list(symbol.bases)
     if symbol.children:
         payload["children"] = [_symbol_payload(child) for child in symbol.children]
     return payload
@@ -441,6 +513,9 @@ def summary_markdown(
     lines.extend(["", "## Coverage", ""])
     lines.extend(coverage_lines(report))
 
+    lines.extend(["", "## Stack", ""])
+    lines.extend(_stack_lines(read_stack(report)))
+
     lines.extend(["", "## Directory Overview", ""])
     lines.extend(_directory_overview(report))
 
@@ -469,6 +544,9 @@ def summary_markdown(
             lines.append(f"- ... and {len(report.cycles) - 20} more")
     else:
         lines.append("- None detected")
+
+    lines.extend(["", "## Possibly Unused Modules", ""])
+    lines.extend(_unused_lines(report))
 
     lines.extend(["", "## Unresolved Internal Imports", ""])
     lines.extend(_unresolved_lines(report))
@@ -517,8 +595,8 @@ def summary_markdown(
             "- `symbols.json`: per-file definitions plus an `index` mapping each defined name to its locations",
             "- `hubs.json`: modules ranked by non-test fan-in and by fan-out, plus `top_hubs` with Go "
             "packages grouped",
-            "- Query without reading these files: `codemapy --find WORDS`, `--importers FILE`, "
-            "`--tests FILE`",
+            "- Query without reading these files: `codemapy --find WORDS`, `--where NAME`, `--outline FILE`, "
+            "`--importers FILE`, `--tests FILE`, `--impact FILE`, `--changed`, `--why FILE`",
             "- `manifest.json`: generation metadata, artifact byte sizes, and `git_commit` for staleness checks",
             "- `report.html`: visual file tree, treemap, dependency graph, and insights "
             "(entry points, hubs, cycles, per-file symbols) for humans",
@@ -747,3 +825,63 @@ def _module_payload(module: ModuleNode) -> dict[str, object]:
 
 def _json_dumps(payload: dict[str, object]) -> str:
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
+
+
+MAX_STACK_NAMES = 15
+MAX_UNUSED_LINES = 15
+
+
+def _stack_payload(manifests: list[Manifest]) -> dict[str, object]:
+    return {
+        "manifests": [
+            {
+                "path": manifest.path,
+                "name": manifest.name,
+                "dependencies": list(manifest.dependencies),
+                "dev_dependencies": list(manifest.dev_dependencies),
+            }
+            for manifest in manifests
+        ],
+        "frameworks": frameworks(manifests),
+    }
+
+
+def _stack_lines(manifests: list[Manifest]) -> list[str]:
+    if not manifests:
+        return ["- No dependency manifests found near the root"]
+    lines = []
+    for manifest in manifests:
+        name = f" ({manifest.name})" if manifest.name else ""
+        parts = []
+        if manifest.dependencies:
+            parts.append(f"{len(manifest.dependencies)} dependencies: {_names(manifest.dependencies)}")
+        if manifest.dev_dependencies:
+            parts.append(f"{len(manifest.dev_dependencies)} dev/optional: {_names(manifest.dev_dependencies)}")
+        lines.append(f"- `{manifest.path}`{name}: " + "; ".join(parts))
+    recognised = frameworks(manifests)
+    if recognised:
+        lines.append(f"- Recognised: {', '.join(recognised)}")
+    return lines
+
+
+def _names(names: tuple[str, ...]) -> str:
+    shown = ", ".join(names[:MAX_STACK_NAMES])
+    return f"{shown}, ... and {len(names) - MAX_STACK_NAMES} more" if len(names) > MAX_STACK_NAMES else shown
+
+
+def _unused_lines(report: Report) -> list[str]:
+    result = possibly_unused(report)
+    unused = result.modules
+    notes = [f"- {note}" for note in result.left_out]
+    if not unused:
+        return ["- None found among files whose language has import analysis", *notes]
+    lines = [*notes, *([""] if notes else []),
+        f"{_count_files(len(unused))} that nothing in the map imports and that are not entry points, tests, "
+        "generated, or loaded by convention. Check before deleting: a file can still be loaded by name "
+        "(plugins, reflection, HTML script tags, build steps).",
+        "",
+    ]
+    lines.extend(f"- `{module.path}` ({module.loc} loc)" for module in unused[:MAX_UNUSED_LINES])
+    if len(unused) > MAX_UNUSED_LINES:
+        lines.append(f"- ... and {len(unused) - MAX_UNUSED_LINES} more (see `possibly_unused` in `context.json`)")
+    return lines

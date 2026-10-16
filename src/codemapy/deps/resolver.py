@@ -6,6 +6,7 @@ from pathlib import Path
 
 from codemapy.deps.csharp import declared_namespaces, declared_types
 from codemapy.deps.gdscript import declared_classes
+from codemapy.deps.java import JAVA_PACKAGE_KIND, WILDCARD_SUFFIX, declared_package
 from codemapy.deps.verilog import declared_modules
 from codemapy.models import FileNode, ImportRef
 
@@ -55,10 +56,12 @@ class ImportResolver:
         self.lua_mod_roots = self._build_lua_mod_roots(files)
         self.csharp_namespaces = self._build_csharp_namespace_index(files)
         self.csharp_types = self._build_csharp_type_index(files)
-        self._csharp_token_cache: dict[str, frozenset[str]] = {}
+        self._type_token_cache: dict[str, frozenset[str]] = {}
         self.go_modules = self._build_go_modules(files)
         self.go_packages = self._build_go_packages(files)
+        self.java_classes, self.java_packages, self.java_roots = self._build_java_index(files)
         self.last_candidates: list[str] = []
+        self.resolved_to_self = False
 
     def resolve(self, source: FileNode, ref: ImportRef) -> tuple[str, ...]:
         """Resolve *ref* to zero or more internal target files.
@@ -66,15 +69,20 @@ class ImportResolver:
         Most languages map an import to a single file; C# `using` directives
         name a namespace that several files share, so resolution is many-valued.
         Afterwards ``last_candidates`` holds the normalized paths this call
-        tried, which explains a failed resolution (see ``codemapy.unresolved``).
+        tried, which explains a failed resolution (see ``codemapy.unresolved``),
+        and ``resolved_to_self`` is True when the import names the importing file
+        itself (a Java import of its own nested class): resolved, but no edge.
         """
         self.last_candidates = []
+        self.resolved_to_self = False
         if source.language == "C#":
             return self._resolve_csharp(source, ref)
         if source.language == "Python":
             return self._resolve_python_import(source, ref)
         if source.language == "Go":
             return self._resolve_go(source, ref)
+        if source.language == "Java":
+            return self._resolve_java(source, ref)
         target = self._resolve_single(source, ref)
         return (target,) if target else ()
 
@@ -148,7 +156,7 @@ class ImportResolver:
         candidates = tuple(path for path in self.csharp_namespaces.get(ref.raw, ()) if path != source.path)
         if not candidates:
             return ()
-        tokens = self._csharp_tokens(source)
+        tokens = self._type_tokens(source)
         targets = tuple(
             path
             for path in candidates
@@ -163,17 +171,81 @@ class ImportResolver:
         relative = max(CSHARP_NAMESPACE_MIN_FANOUT_CAP, csharp_files // CSHARP_NAMESPACE_FANOUT_DIVISOR)
         return min(CSHARP_NAMESPACE_FANOUT_CAP, relative)
 
-    def _csharp_tokens(self, source: FileNode) -> frozenset[str]:
-        """PascalCase-ish identifiers appearing in *source*, cached per file."""
-        cached = self._csharp_token_cache.get(source.path)
+    def _type_tokens(self, source: FileNode) -> frozenset[str]:
+        """PascalCase-ish identifiers appearing in *source* (C# and Java), cached per file."""
+        cached = self._type_token_cache.get(source.path)
         if cached is None:
             try:
                 text = source.absolute_path.read_text(encoding="utf-8", errors="ignore")
             except OSError:
                 text = ""
             cached = frozenset(re.findall(r"\b[A-Z][A-Za-z0-9_]*", text))
-            self._csharp_token_cache[source.path] = cached
+            self._type_token_cache[source.path] = cached
         return cached
+
+    def _resolve_java(self, source: FileNode, ref: ImportRef) -> tuple[str, ...]:
+        """Resolve a Java import, or the file's own package, to class files.
+
+        ``import a.b.C`` (or nested ``a.b.C.Inner``) maps through the
+        fully-qualified-name index; ``import a.b.*`` and the file's own
+        package (``java-package``) map to the package's classes that the
+        source mentions by name, as C# ``using`` resolution does.
+        """
+        if ref.kind == JAVA_PACKAGE_KIND or ref.raw.endswith(WILDCARD_SUFFIX):
+            package = ref.raw.removesuffix(WILDCARD_SUFFIX)
+            tokens = self._type_tokens(source)
+            return tuple(
+                path
+                for path in self.java_packages.get(package, ())
+                if path != source.path and Path(path).stem in tokens
+            )
+        parts = ref.raw.split(".")
+        for length in range(len(parts), 0, -1):
+            target = self.java_classes.get(".".join(parts[:length]))
+            if target == source.path:
+                self.resolved_to_self = True
+                return ()
+            if target:
+                return (target,)
+        # Not mapped: the paths it would have under each source root, so a
+        # skipped folder can be named.
+        relative = "/".join(parts) + ".java"
+        self.last_candidates.extend(posixpath.join(root, relative) if root else relative for root in self.java_roots)
+        return ()
+
+    def _build_java_index(
+        self, files: tuple[FileNode, ...]
+    ) -> tuple[dict[str, str], dict[str, tuple[str, ...]], tuple[str, ...]]:
+        """Fully-qualified class name -> file, package -> files, and source roots.
+
+        A source root is the folder above a file's package path
+        (``src/main/java`` for ``src/main/java/a/b/C.java`` in package
+        ``a.b``). The class name is the file name, Java's rule for public
+        top-level classes.
+        """
+        classes: dict[str, str] = {}
+        packages: dict[str, list[str]] = {}
+        roots: set[str] = set()
+        for file in files:
+            if file.language != "Java":
+                continue
+            package = declared_package(file.absolute_path) or ""
+            stem = Path(file.path).stem
+            classes.setdefault(f"{package}.{stem}" if package else stem, file.path)
+            packages.setdefault(package, []).append(file.path)
+            folder = _posix_dir(posixpath.dirname(file.path))
+            package_path = package.replace(".", "/")
+            if not package_path:
+                roots.add(folder)
+            elif folder == package_path:
+                roots.add("")
+            elif folder.endswith(f"/{package_path}"):
+                roots.add(folder[: -len(package_path) - 1])
+        return (
+            classes,
+            {package: tuple(sorted(paths)) for package, paths in packages.items()},
+            tuple(sorted(roots)),
+        )
 
     def _build_csharp_type_index(self, files: tuple[FileNode, ...]) -> dict[str, frozenset[str]]:
         return {

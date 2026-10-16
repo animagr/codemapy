@@ -63,7 +63,11 @@ class ImportRef:
 
 @dataclass(frozen=True)
 class Symbol:
-    """A definition found in a source file (function, class, method, ...)."""
+    """A definition found in a source file (function, class, method, ...).
+
+    ``bases`` holds what a class extends or implements, as written in the
+    source (``Base``, ``abc.ABC``, ``ns::Widget``, ``List<T>``).
+    """
 
     name: str
     kind: str
@@ -72,6 +76,7 @@ class Symbol:
     signature: str | None = None
     doc: str | None = None
     children: tuple["Symbol", ...] = ()
+    bases: tuple[str, ...] = ()
 
     def flatten(self, prefix: str = "") -> "list[tuple[str, Symbol]]":
         """Yield ``(qualified_name, symbol)`` pairs for self and descendants."""

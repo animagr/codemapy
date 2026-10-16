@@ -124,6 +124,42 @@ _SYMBOL_QUERIES: dict[str, str] = {
     """,
 }
 
+# What a class extends or implements: @def is the class node (the same node
+# the symbol query captures), @base each base type as written.
+_BASE_QUERIES: dict[str, str] = {
+    "javascript": """
+        (class_declaration (class_heritage (_) @base)) @def
+    """,
+    "typescript": """
+        (class_declaration (class_heritage (extends_clause value: (_) @base))) @def
+        (class_declaration (class_heritage (implements_clause (_) @base))) @def
+        (abstract_class_declaration (class_heritage (extends_clause value: (_) @base))) @def
+        (abstract_class_declaration (class_heritage (implements_clause (_) @base))) @def
+        (interface_declaration (extends_type_clause (_) @base)) @def
+    """,
+    "java": """
+        (class_declaration superclass: (superclass (_) @base)) @def
+        (class_declaration interfaces: (super_interfaces (type_list (_) @base))) @def
+        (interface_declaration (extends_interfaces (type_list (_) @base))) @def
+        (enum_declaration interfaces: (super_interfaces (type_list (_) @base))) @def
+    """,
+    "csharp": """
+        (class_declaration (base_list (_) @base)) @def
+        (interface_declaration (base_list (_) @base)) @def
+        (struct_declaration (base_list (_) @base)) @def
+        (record_declaration (base_list (_) @base)) @def
+    """,
+    "cpp": """
+        (class_specifier
+            (base_class_clause [(type_identifier) (qualified_identifier) (template_type)] @base)) @def
+        (struct_specifier
+            (base_class_clause [(type_identifier) (qualified_identifier) (template_type)] @base)) @def
+    """,
+    "ruby": """
+        (class superclass: (superclass (_) @base)) @def
+    """,
+}
+
 # Grammars that reuse another grammar's query.
 _QUERY_ALIASES = {"tsx": "typescript"}
 
@@ -167,6 +203,7 @@ class _ProtoSymbol:
     start: tuple[int, int]
     end: tuple[int, int]
     children: list["_ProtoSymbol"] = field(default_factory=list)
+    bases: tuple[str, ...] = ()
 
 
 def _query_symbols(path: Path, pack_name: str, query_source: str) -> tuple[Symbol, ...]:
@@ -195,7 +232,29 @@ def _query_symbols(path: Path, pack_name: str, query_source: str) -> tuple[Symbo
             end=tuple(def_node.end_point[:2]),
         )
         entries.setdefault((proto.name, proto.kind, proto.start, proto.end), proto)
+    bases = _bases_by_span(source, pack_name)
+    for proto in entries.values():
+        proto.bases = bases.get((proto.start, proto.end), ())
     return tuple(_freeze_symbols(_nest_by_span(list(entries.values()))))
+
+
+def _bases_by_span(source: bytes, pack_name: str) -> dict[tuple[tuple[int, int], tuple[int, int]], tuple[str, ...]]:
+    """Base types per class node span, in source order."""
+    query_source = _BASE_QUERIES.get(_QUERY_ALIASES.get(pack_name, pack_name))
+    if query_source is None:
+        return {}
+    found: dict[tuple[tuple[int, int], tuple[int, int]], list[str]] = {}
+    for capture_map in backend.query_matches(pack_name, source, query_source):
+        class_nodes, base_nodes = capture_map.get("def"), capture_map.get("base")
+        if not class_nodes or not base_nodes:
+            continue
+        span = (tuple(class_nodes[0].start_point[:2]), tuple(class_nodes[0].end_point[:2]))
+        names = found.setdefault(span, [])
+        for node in base_nodes:
+            text = node.text.decode("utf-8", "ignore")
+            if text not in names:
+                names.append(text)
+    return {span: tuple(names) for span, names in found.items()}
 
 
 def _nest_by_span(entries: list[_ProtoSymbol]) -> list[_ProtoSymbol]:
@@ -233,6 +292,7 @@ def _freeze_symbols(protos: list[_ProtoSymbol]) -> list[Symbol]:
             start_line=proto.start[0] + 1,
             end_line=proto.end[0] + 1,
             children=tuple(_freeze_symbols(proto.children)),
+            bases=proto.bases,
         )
         for proto in protos
     ]
@@ -299,6 +359,7 @@ def _python_node_symbol(node: ast.stmt, *, is_method: bool) -> Symbol:
             end_line=getattr(node, "end_lineno", node.lineno) or node.lineno,
             doc=ast.get_docstring(node),
             children=children,
+            bases=tuple(ast.unparse(base) for base in node.bases),
         )
 
     # Function or async function.

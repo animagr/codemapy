@@ -18,7 +18,8 @@ This is a fresh implementation inspired by the Go `codemap/` project, with a del
 - test and generated files classified, so hubs and entry points describe the program rather than its test suite or codegen output
 - imports that name a project file but miss the map are reported with the reason, instead of passing as external references
 - per-file test coverage (which tests import or are named after each file) and a coverage statement saying what each language's numbers can and cannot show
-- `--find`, `--importers`, and `--tests` queries that answer from the written artifacts without rescanning
+- queries that answer from the written artifacts without rescanning: find files, where a name is defined, a file's outline, its importers, its tests, what a change affects, and why a file is not mapped
+- a stack summary (declared dependencies and recognised frameworks) and a list of possibly unused modules
 - HTML report generated with embedded CSS/JS
 
 ## Parsing Backend
@@ -53,13 +54,13 @@ Requires Python 3.11+.
 
 `codemapy` supports three levels of language handling:
 
-- **Dependency graph support** (imports resolved to internal edges): Python (`.py`, including `from package import submodule` and namespace packages), JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`), TypeScript (`.ts`, `.tsx`), Svelte (`.svelte`), GDScript (`.gd`, including `class_name` usage and `project.godot` autoload singletons), Lua (`.lua`), Rust (`.rs`), C# (`.cs`, via `using`/namespace resolution filtered by referenced type names), C/C++ includes (`.c`, `.h`, `.cc`, `.cpp`, `.cxx`, `.hpp`), Go (`.go`, via the module paths in the repo's `go.mod` files; an import links every non-test file of the package), and basic Verilog/SystemVerilog (`.v`, `.vh`, `.sv`, `.svh`)
+- **Dependency graph support** (imports resolved to internal edges): Python (`.py`, including `from package import submodule` and namespace packages), JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`), TypeScript (`.ts`, `.tsx`), Svelte (`.svelte`), GDScript (`.gd`, including `class_name` usage and `project.godot` autoload singletons), Lua (`.lua`), Rust (`.rs`), C# (`.cs`, via `using`/namespace resolution filtered by referenced type names), C/C++ includes (`.c`, `.h`, `.cc`, `.cpp`, `.cxx`, `.hpp`), Java (`.java`, via `package` declarations; classes of the same package link by the names a file mentions), Go (`.go`, via the module paths in the repo's `go.mod` files; an import links every non-test file of the package), and basic Verilog/SystemVerilog (`.v`, `.vh`, `.sv`, `.svh`)
 - **Symbol extraction** (functions, classes, methods, structs, etc. recorded in `symbols.json`, counted per file in `context.json`): Python (`ast`, with signatures and docstrings), and via tree-sitter — JavaScript, TypeScript, Go, Rust, Java, C#, Ruby, C, C++, Lua, GDScript (classes, functions, signals, enums), Verilog/SystemVerilog (modules, functions, tasks), and Bash/shell scripts. Definitions are nested by span, so methods carry their declaring class and the symbol index records qualified names such as `Widget.update`.
 - **File scanning, LOC counts, tree, and treemap labels:** Python, JavaScript, TypeScript, Svelte, GDScript, Verilog, SystemVerilog, Go, Rust, Ruby, Java, C#, C, C++, Swift, Kotlin, PHP, Lua, Scala, Elixir, Solidity, and shell scripts
 
 Files outside these languages are not counted as source: documentation (`.md`, `.rst`, `.adoc`, `.txt`, ...) is listed separately in the artifacts, and remaining files (images, data, binaries) are summarised per extension so they never inflate LOC totals or the treemap.
 
-Planned dependency graph support: Bash, Java, and Ruby (these currently have symbol extraction but not import-resolved dependency edges).
+Planned dependency graph support: Bash and Ruby (these currently have symbol extraction but not import-resolved dependency edges).
 
 ## Usage
 
@@ -75,6 +76,11 @@ py -3.14 -m codemapy --root <dir> --artifacts --yes
 py -3.14 -m codemapy <path> --find "import resolver"
 py -3.14 -m codemapy <path> --importers src/db/queries.ts
 py -3.14 -m codemapy <path> --tests queries.ts
+py -3.14 -m codemapy <path> --where ImportResolver
+py -3.14 -m codemapy <path> --outline src/db/queries.ts
+py -3.14 -m codemapy <path> --impact src/db/queries.ts
+py -3.14 -m codemapy <path> --changed
+py -3.14 -m codemapy <path> --why src/legacy/old.py
 ```
 
 With no options, codemapy scans the project and prints a compact file tree to the terminal. It writes nothing to disk.
@@ -96,6 +102,11 @@ With no options, codemapy scans the project and prints a compact file tree to th
 | `--find WORDS` | Rank the project's files against WORDS, matching path and symbol-name words (BM25), and print the top ones with their matching symbols and importer counts. Reads the existing `.codemapy/` artifacts; nothing is rescanned. See [Querying the Artifacts](#querying-the-artifacts). |
 | `--importers FILE` | List the files that import FILE, production importers first, from the existing artifacts. FILE can be the project-relative path, a path relative to the current directory, or a unique trailing part such as `queries.ts`. |
 | `--tests FILE` | List the test files that cover FILE directly: they import it or are named after it. |
+| `--where NAME` | Show where NAME is defined (a plain name or `Class.member`): file, lines, kind, signature, what it extends, and what extends it. |
+| `--outline FILE` | List FILE's classes, functions and methods in source order, with line ranges, signatures, and the first line of each docstring. |
+| `--impact FILE` | List every file that depends on FILE, directly or through other files, grouped by distance, and the tests that cover the changed or affected code. |
+| `--changed [REF]` | Like `--impact`, for every file changed since REF (default: uncommitted changes against HEAD), listing changed files the map does not hold. |
+| `--why FILE` | Explain why FILE is or is not in the map: mapped, skipped (with the rule and the `.codemap.json` fix), documentation, an unmapped file type, missing, or added after the artifacts were written. |
 | `--limit N` | Rows a query prints (default 10 for `--find`, 50 otherwise; 0 for all). |
 | `-h`, `--help` | Show the option summary and exit. |
 
@@ -105,7 +116,7 @@ Pass several paths to map each one in turn, or `--root <dir>` to map every immed
 
 With more than one project, each gets a `=== [n/N] <path> ===` header, a failure in one project is reported and the rest still run (exit code 1 if any failed), `--json` prints a single JSON array, and `--check` prints one line per project and exits with the worst result. `--html` writes a single file, so it is rejected; use `--artifacts` instead. Existing `.codemapy/` folders are confirmed one by one unless `--yes` is given.
 
-`--check` reports whether existing `.codemapy` artifacts are stale without rewriting them: exit code 0 means fresh, 1 stale, 2 missing. In a git repository the check compares the commit (and dirty state) recorded in `manifest.json` against HEAD; elsewhere it falls back to comparing source file modification times. codemapy's own `.codemapy/` folders never count as uncommitted changes, so the artifacts don't need to be committed or added to `.gitignore` to read as fresh.
+`--check` reports whether existing `.codemapy` artifacts are stale without rewriting them: exit code 0 means fresh, 1 stale, 2 missing. In a git repository the check compares the commit (and dirty state) recorded in `manifest.json` against HEAD; elsewhere it falls back to comparing source file modification times. A stale result names the files changed since the artifacts were written (up to 10), and artifacts written from uncommitted changes stay fresh until something changes again. codemapy's own `.codemapy/` folders never count as uncommitted changes, so the artifacts don't need to be committed or added to `.gitignore` to read as fresh.
 
 From a checkout without installing the package, add the backend dependencies first so tree-sitter
 parsing and exact gitignore matching are available (otherwise codemapy falls back to regex/`ast`
@@ -146,10 +157,10 @@ python -m codemapy <path> --artifacts
 Generated files:
 
 - `report.html` - human-readable file tree, treemap, dependency graph, and an insights panel with entry points, top hubs, dependency cycles, unresolved internal imports, and per-file details (dependencies, external references, unresolved imports, symbol outline)
-- `context.json` - full machine-readable scan data for AI agents, including imports, per-file symbol counts, a `has_main_guard` flag marking directly runnable Python files, `is_test` / `is_generated` flags, `test_fan_in` (importers that are tests), and `tested_by` (the tests covering it) per module, dependency edges, unresolved internal imports with their reasons, circular-dependency groups, documentation files, asset summaries, project metadata files such as lockfiles and config files, and a `coverage` block (full symbol detail lives in `symbols.json`)
-- `summary.md` - compact project briefing for agent context: languages, test and generated file counts, coverage (what each language's numbers can show, and what was skipped), a directory overview, entry points, top hubs (a Go package is one row), direct test coverage and untested hubs, largest files, dependency cycles, unresolved internal imports grouped by cause, generated files, symbols by kind, external references, documentation and metadata files, and a guide to the other artifacts
+- `context.json` - full machine-readable scan data for AI agents, including imports, per-file symbol counts, a `has_main_guard` flag marking directly runnable Python files, `is_test` / `is_generated` flags, `test_fan_in` (importers that are tests), and `tested_by` (the tests covering it) per module, dependency edges, unresolved internal imports with their reasons, circular-dependency groups, documentation files, asset summaries, project metadata files such as lockfiles and config files, a `coverage` block, the `stack` (declared dependencies and recognised frameworks), `possibly_unused` modules, and the `skipped` folders and files with their reasons (full symbol detail lives in `symbols.json`)
+- `summary.md` - compact project briefing for agent context: languages, test and generated file counts, coverage (what each language's numbers can show, and what was skipped), the stack, a directory overview, entry points, top hubs (a Go package is one row), direct test coverage and untested hubs, largest files, dependency cycles, possibly unused modules, unresolved internal imports grouped by cause, generated files, symbols by kind, external references, documentation and metadata files, and a guide to the other artifacts
 - `hubs.json` - every connected module, the top production hubs ranked by non-test fan-in and by fan-out, and `top_hubs` with each Go package as one row
-- `symbols.json` - per-file definitions plus a flat name index (`name -> [{path, qualified_name, kind, line}]`) so an agent can locate "where is X defined?" directly
+- `symbols.json` - per-file definitions (with signatures, docstrings, and `bases`: what each class extends or implements) plus a flat name index (`name -> [{path, qualified_name, kind, line}]`) so an agent can locate "where is X defined?" directly
 - `manifest.json` - artifact metadata, counts, per-file byte sizes, and the git commit/dirty state at generation time (used by `--check` for staleness)
 
 The `.codemapy/` folder is ignored by future scans.
@@ -182,15 +193,31 @@ Generated files are flagged `is_generated` and listed in `summary.md`. They stay
 
 ### Querying the Artifacts
 
-On a large repo, `context.json` and `symbols.json` run to megabytes, too much for an agent to read whole. Three queries answer from them instead, in a few lines and without rescanning:
+On a large repo, `context.json` and `symbols.json` run to megabytes, too much for an agent to read whole. These queries answer from them instead, in a few lines and without rescanning:
 
 ```bash
 py -3.14 -m codemapy <path> --find "import resolver"      # which files are about this?
+py -3.14 -m codemapy <path> --where ImportResolver        # where is it defined; what extends it?
+py -3.14 -m codemapy <path> --outline resolver.py         # what is in this file?
 py -3.14 -m codemapy <path> --importers resolver.py       # who imports this file?
 py -3.14 -m codemapy <path> --tests resolver.py           # which tests cover it directly?
+py -3.14 -m codemapy <path> --impact resolver.py          # what could a change break; which tests to run?
+py -3.14 -m codemapy <path> --changed                     # the same, for every uncommitted change
+py -3.14 -m codemapy <path> --why vendor/lib.py           # why is this file not in the map?
 ```
 
-`--find` ranks files with BM25 over the words in their path and symbol names (`ImportResolver` counts as `import` and `resolver`). An exact file stem or symbol name scores a bonus, and tests and generated files count half. Each hit lists its matching symbols, its importers, and whether it is a hub (3 or more importers outside the tests). Every answer names the artifacts it came from (git commit and generation time). If they are stale, a note says so on stderr, and if they are missing the query exits with code 2. Add `--json` for machine-readable output.
+- `--find` ranks files with BM25 over the words in their path and symbol names (`ImportResolver` counts as `import` and `resolver`). An exact file stem or symbol name scores a bonus, and tests and generated files count half. Each hit lists its matching symbols, its importers, and whether it is a hub (3 or more importers outside the tests).
+- `--where` and `--outline` read `symbols.json`, including what each class extends or implements (Python from `ast`; JavaScript, TypeScript, Java, C#, C++ and Ruby from tree-sitter). `--where` also lists the classes that extend the one asked about.
+- `--impact` walks importers of importers, so it reports the files a change can break by distance, plus every test that imports any of them or is named after one (`tested_by`). `--changed` does the same for the files `git diff` reports, and names changed files the map does not hold.
+- `--why` explains a missing file: the skip rule and the `.codemap.json` change that would map it, or that it is documentation, an unmapped file type, or newer than the artifacts.
+
+FILE can be the project-relative path, a path relative to the current directory, or a unique trailing part such as `resolver.py`. Every answer names the artifacts it came from (git commit and generation time). If they are stale, a note on stderr names the changed files, and rows for files changed since the artifacts were written are marked `[changed]`. If the artifacts are missing the query exits with code 2. Add `--json` for machine-readable output.
+
+### Stack and Possibly Unused Modules
+
+`summary.md` lists the declared dependencies of the manifests near the root (`pyproject.toml`, `requirements*.txt`, `package.json`, `Cargo.toml`, `go.mod`; ones inside test fixtures are skipped) and the well-known frameworks and tools among them, such as `PySide6 (Qt GUI)`, `pytest (tests)`, or `PyVISA (instrument control)`. Only names are read; nothing is installed.
+
+It also lists possibly unused modules: files that nothing in the map imports. Only languages whose imports are analysed count, and files that are normally loaded without an import are left out: entry points and runnable scripts, tests, generated files, files a manifest names (`package.json` `main`/`bin`, Cargo crate roots, `[project.scripts]`), package and crate roots, C/C++ and HDL compile units, config and worker files, framework route files, Java `package-info.java`, and anything under folders of scripts, examples, docs, or templates. A Go file counts only when its whole package is unused. JavaScript/TypeScript is left out entirely, with the reason stated, when the project declares import path aliases or holds `.vue`, `.astro`, or `.mdx` files, since those importers are invisible to the map. Treat the list as candidates to check, not a verdict.
 
 ### Test Coverage
 

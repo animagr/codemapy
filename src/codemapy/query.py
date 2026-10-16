@@ -8,6 +8,9 @@ return a few lines instead:
   tokens with BM25, following codemap's ``find`` (``codemap/find/find.go``).
 - ``importers``: the files that import a given file.
 - ``tests``: the tests that cover a given file directly.
+
+``symbol_queries`` (``--where``, ``--outline``), ``impact`` (``--impact``,
+``--changed``) and ``why`` (``--why``) build on the same ``Artifacts``.
 """
 
 from __future__ import annotations
@@ -16,7 +19,7 @@ import json
 import math
 import re
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from codemapy.artifacts import ARTIFACT_DIR_NAME
@@ -58,6 +61,10 @@ class Artifacts:
     symbol_names: dict[str, list[str]]
     git_commit: str | None
     generated_at: str | None
+    symbol_tree: dict[str, list[dict[str, object]]] = field(default_factory=dict)
+    skipped: list[dict[str, object]] = field(default_factory=list)
+    doc_files: frozenset[str] = frozenset()
+    metadata_files: frozenset[str] = frozenset()
 
     @property
     def source_note(self) -> str:
@@ -99,6 +106,10 @@ def load_artifacts(root: Path) -> Artifacts:
         symbol_names={path: _flatten_names(entries) for path, entries in symbols.get("files", {}).items()},
         git_commit=manifest.get("git_commit"),
         generated_at=manifest.get("generated_at"),
+        symbol_tree=symbols.get("files", {}),
+        skipped=context.get("skipped", []),
+        doc_files=frozenset(item["path"] for item in context.get("doc_files", [])),
+        metadata_files=frozenset(item["path"] for item in context.get("metadata_files", [])),
     )
 
 

@@ -38,6 +38,23 @@ def is_dirty(root: Path, ignored_dir_names: Collection[str] = ()) -> bool | None
     return any(ignored.isdisjoint(PurePosixPath(path).parts) for path in _status_paths(output))
 
 
+def changed_files(root: Path, since: str = "HEAD", ignored_dir_names: Collection[str] = ()) -> list[str] | None:
+    """Files changed under *root* since commit *since*, or ``None`` outside git.
+
+    Covers commits made since *since* and uncommitted edits (``git diff
+    <since>`` compares the working tree), plus untracked files. Paths are
+    relative to *root*, even when *root* is a subfolder of the repository, and
+    files under a folder named in *ignored_dir_names* are left out.
+    """
+    tracked = _run_git(root, "diff", "--name-only", "--relative", "-z", since, "--")
+    untracked = _run_git(root, "ls-files", "--others", "--exclude-standard", "-z")
+    if tracked is None or untracked is None:
+        return None
+    ignored = frozenset(ignored_dir_names)
+    paths = {path for path in (tracked + "\0" + untracked).split("\0") if path}
+    return sorted(path for path in paths if ignored.isdisjoint(PurePosixPath(path).parts))
+
+
 def _status_paths(output: str) -> list[str]:
     """Return the path of each entry in ``git status --porcelain -z`` output.
 

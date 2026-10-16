@@ -13,7 +13,8 @@ An unresolved import is reported as an internal miss when either:
 2. Its syntax can only name a project file (a relative JS/TS script path, a
    relative C include, a Rust ``mod x;``, a Python relative import or one
    rooted at a top-level project package, a GDScript ``.gd`` path, a Go import
-   under one of the repo's go.mod module paths) and none of the candidates
+   under one of the repo's go.mod module paths, a Java class import inside a
+   package the repo declares) and none of the candidates
    exists. These are reported as missing.
 
 Everything else stays external. The shape rules are deliberately narrow:
@@ -68,6 +69,8 @@ REASON_LABELS = {
     SkipReason.BUILD_OUTPUT: "named like build output",
 }
 MISSING_NOTE = "it may be generated at build time, or the import may be stale"
+# Skipped folders that never hold project source, so no keep_dirs hint is offered.
+NEVER_SOURCE_DIRS = frozenset({"__pycache__", "node_modules"})
 
 
 class UnresolvedClassifier:
@@ -79,10 +82,14 @@ class UnresolvedClassifier:
         files: tuple[FileNode, ...],
         skipped: tuple[SkippedPath, ...],
         go_modules: Iterable[str] = (),
+        java_packages: Iterable[str] = (),
     ) -> None:
-        """*go_modules* are the module paths declared by the repo's go.mod files."""
+        """*go_modules* are the module paths of the repo's go.mod files; *java_packages*
+        the packages its Java files declare."""
         self.root = root.resolve()
         self._go_modules = tuple(go_modules)
+        self._java_packages = frozenset(package for package in java_packages if package)
+        self._java_namespace = _java_namespace(self._java_packages)
         self._paths = {file.path for file in files}
         self._skipped_dirs = {item.path: item for item in skipped if item.is_dir}
         self._skipped_files = {item.path: item for item in skipped if not item.is_dir}
@@ -166,6 +173,14 @@ class UnresolvedClassifier:
             return ref.kind == "rust-mod"
         if source.language == "GDScript":
             return ref.kind == "gdscript-path" and raw.endswith(".gd")
+        if source.language == "Java":
+            # A class import inside a package the repo declares: `a.b.C` or `a.b.C.Inner`.
+            parts = raw.removesuffix(".*").split(".")
+            in_declared_package = any(
+                ".".join(parts[:length]) in self._java_packages for length in range(1, len(parts))
+            )
+            in_namespace = bool(self._java_namespace) and raw.startswith(f"{self._java_namespace}.")
+            return ref.kind == "java-import" and (in_declared_package or in_namespace)
         if source.language == "Go":
             return raw.startswith(RELATIVE_PATH_PREFIXES) or any(
                 raw == module or raw.startswith(f"{module}/") for module in self._go_modules
@@ -194,6 +209,24 @@ class UnresolvedClassifier:
         # A folder of Python files without an __init__.py is a namespace
         # package (PEP 420), so importing it by name is valid.
         return not any(posixpath.join(base, *parts) in self._python_dirs for base in bases)
+
+
+# A shared package prefix needs this many segments to count as the project's
+# own namespace (`com.acme`), so `org.x` does not claim `org.junit`.
+MIN_JAVA_NAMESPACE_SEGMENTS = 2
+
+
+def _java_namespace(packages: frozenset[str]) -> str:
+    """The longest package prefix every declared package shares, or "" if too short."""
+    if not packages:
+        return ""
+    split = [package.split(".") for package in packages]
+    common: list[str] = []
+    for segments in zip(*split):
+        if len(set(segments)) != 1:
+            break
+        common.append(segments[0])
+    return ".".join(common) if len(common) >= MIN_JAVA_NAMESPACE_SEGMENTS else ""
 
 
 def _python_dirs(files: tuple[FileNode, ...]) -> frozenset[str]:
@@ -288,12 +321,22 @@ def unresolved_warnings(items: Iterable[UnresolvedImport]) -> list[str]:
 
 
 def _hint(group: UnresolvedGroup) -> str:
-    if group.hidden_by is None or not group.hidden_by.endswith("/"):
+    return skip_hint(group.reason, group.hidden_by)
+
+
+def skip_hint(reason: SkipReason | None, hidden_by: str | None) -> str:
+    """The .codemap.json change that would map a skipped folder, or "" if none applies.
+
+    *hidden_by* is the skipped path; a folder ends with "/".
+    """
+    if hidden_by is None or not hidden_by.endswith("/"):
         return ""
-    name = group.hidden_by.rstrip("/").rsplit("/", 1)[-1]
-    if group.reason in {SkipReason.DEFAULT_IGNORE, SkipReason.TOOL_OUTPUT}:
+    name = hidden_by.rstrip("/").rsplit("/", 1)[-1]
+    if name.startswith(".") or name in NEVER_SOURCE_DIRS:
+        return ""
+    if reason in {SkipReason.DEFAULT_IGNORE, SkipReason.TOOL_OUTPUT}:
         return f'If it holds real source, add "{name}" to keep_dirs in .codemap.json'
-    if group.reason is SkipReason.CONFIG_IGNORE:
+    if reason is SkipReason.CONFIG_IGNORE:
         return f'To map it, remove "{name}" from ignore_dirs in .codemap.json'
     return ""
 

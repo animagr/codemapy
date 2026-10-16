@@ -8,10 +8,13 @@ import webbrowser
 from dataclasses import asdict
 from pathlib import Path
 
+from . import gitinfo
 from .artifacts import (
+    ARTIFACT_DIR_NAME,
     ArtifactPaths,
     artifact_dir_for,
     artifact_notes,
+    changed_since_artifacts,
     check_artifacts,
     report_payload,
     write_artifacts,
@@ -19,9 +22,11 @@ from .artifacts import (
 from .config import load_config, merge_cli_config
 from .graph import build_report
 from .models import Report
+from .impact import format_impact, impact
 from .query import (
     FIND_DEFAULT_LIMIT,
     LIST_DEFAULT_LIMIT,
+    Artifacts,
     ArtifactsMissing,
     UnknownPath,
     find,
@@ -36,6 +41,8 @@ from .query import (
 from .render.html import write_html
 from .render.terminal import render_tree
 from .scanner import scan_project
+from .symbol_queries import format_outline, format_where, symbol_records, where
+from .why import why
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -49,9 +56,9 @@ def main(argv: list[str] | None = None) -> int:
     batch = len(targets) > 1 or bool(args.root)
     if batch and args.html:
         parser.error("--html writes a single file; use --artifacts to map several projects")
-    querying = args.find is not None or args.importers is not None or args.tests is not None
+    querying = any(getattr(args, flag) is not None for flag in QUERY_FLAGS)
     if querying and batch:
-        parser.error("--find, --importers and --tests read one project's artifacts; give a single path")
+        parser.error("queries read one project's artifacts; give a single path")
     if args.limit is not None and args.limit < 0:
         parser.error("--limit must be 0 (no limit) or more")
 
@@ -149,6 +156,25 @@ def _build_parser() -> argparse.ArgumentParser:
     queries.add_argument(
         "--tests", metavar="FILE", help="List the tests that import FILE or are named after it."
     )
+    queries.add_argument(
+        "--where", metavar="NAME", help="Show where NAME (or Class.member) is defined, with bases and subclasses."
+    )
+    queries.add_argument(
+        "--outline", metavar="FILE", help="List FILE's classes, functions and signatures with line ranges."
+    )
+    queries.add_argument(
+        "--impact",
+        metavar="FILE",
+        help="List everything that depends on FILE, by distance, and the tests covering it.",
+    )
+    queries.add_argument(
+        "--changed",
+        nargs="?",
+        const="HEAD",
+        metavar="REF",
+        help="Like --impact, for the files changed since REF (default: uncommitted changes vs HEAD).",
+    )
+    queries.add_argument("--why", metavar="FILE", help="Explain why FILE is, or is not, in the map.")
     parser.add_argument(
         "--limit",
         type=int,
@@ -191,8 +217,11 @@ def _check_all(targets: list[Path], batch: bool) -> int:
     return worst
 
 
+QUERY_FLAGS = ("find", "where", "outline", "importers", "tests", "impact", "changed", "why")
+
+
 def _query(root: Path, args: argparse.Namespace) -> int:
-    """Answer --find / --importers / --tests from root's artifacts: 0 answered, 2 cannot."""
+    """Answer one query from root's artifacts: 0 answered, 2 cannot."""
     code, message = check_artifacts(root)
     if code == 2:
         print(message, file=sys.stderr)
@@ -204,36 +233,76 @@ def _query(root: Path, args: argparse.Namespace) -> int:
     except ArtifactsMissing as exc:
         print(exc, file=sys.stderr)
         return 2
+    changed = frozenset(changed_since_artifacts(root) or ())
+    limit = args.limit if args.limit is not None else (FIND_DEFAULT_LIMIT if args.find is not None else LIST_DEFAULT_LIMIT)
 
     if args.find is not None:
-        limit = FIND_DEFAULT_LIMIT if args.limit is None else args.limit
         hits = find(artifacts, args.find)
         if args.json:
-            print(json.dumps([{**asdict(hit), "is_hub": hit.is_hub} for hit in hits[: limit or None]], indent=2))
-        else:
-            print("\n".join(format_find(artifacts, args.find, hits, limit)))
-        return 0
+            return _print_json([{**asdict(hit), "is_hub": hit.is_hub} for hit in hits[: limit or None]])
+        return _print_lines(format_find(artifacts, args.find, hits, limit))
+    if args.where is not None:
+        records = where(artifacts, args.where)
+        if args.json:
+            return _print_json([asdict(record) for record in records[: limit or None]])
+        return _print_lines(format_where(artifacts, args.where, records, limit, changed))
+    if args.why is not None:
+        lines = why(artifacts, args.why, Path.cwd())
+        return _print_json({"path": args.why, "explanation": lines}) if args.json else _print_lines(lines)
+    if args.changed is not None:
+        return _query_changed(root, artifacts, args.changed, limit, args.json)
 
-    limit = LIST_DEFAULT_LIMIT if args.limit is None else args.limit
     try:
-        path = resolve_path(artifacts, args.importers or args.tests, Path.cwd())
+        path = resolve_path(artifacts, args.outline or args.importers or args.tests or args.impact, Path.cwd())
     except UnknownPath as exc:
         print(exc, file=sys.stderr)
         for candidate in exc.candidates[:LIST_DEFAULT_LIMIT]:
             print(f"  {candidate}", file=sys.stderr)
         return 2
+    if args.outline is not None:
+        records = symbol_records(artifacts, path)
+        if args.json:
+            return _print_json({"path": path, "symbols": [asdict(record) for record in records]})
+        return _print_lines(format_outline(artifacts, path, records, limit, changed))
     if args.importers is not None:
         pairs = importers_of(artifacts, path)
         if args.json:
-            print(json.dumps({"path": path, "importers": [{"source": s, "raw": r} for s, r in pairs]}, indent=2))
-        else:
-            print("\n".join(format_importers(artifacts, path, pairs, limit)))
-        return 0
+            return _print_json({"path": path, "importers": [{"source": s, "raw": r} for s, r in pairs]})
+        return _print_lines(format_importers(artifacts, path, pairs, limit))
+    if args.impact is not None:
+        result = impact(artifacts, [path])
+        if args.json:
+            return _print_json(asdict(result))
+        return _print_lines(format_impact(artifacts, result, limit, changed))
     tests = tests_of(artifacts, path)
     if args.json:
-        print(json.dumps({"path": path, "tested_by": tests}, indent=2))
-    else:
-        print("\n".join(format_tests(artifacts, path, tests, limit)))
+        return _print_json({"path": path, "tested_by": tests})
+    return _print_lines(format_tests(artifacts, path, tests, limit))
+
+
+def _query_changed(root: Path, artifacts: Artifacts, ref: str, limit: int, as_json: bool) -> int:
+    """--changed: the impact of every file changed since *ref*."""
+    files = gitinfo.changed_files(root, since=ref, ignored_dir_names=(ARTIFACT_DIR_NAME,))
+    if files is None:
+        print(f"Cannot list changes: {root} is not a git repository, or `{ref}` is not a known commit", file=sys.stderr)
+        return 2
+    mapped = [path for path in files if path in artifacts.modules]
+    unmapped = [path for path in files if path not in artifacts.modules]
+    result = impact(artifacts, mapped)
+    if as_json:
+        return _print_json({**asdict(result), "unmapped": unmapped})
+    if not files:
+        return _print_lines([f"No files changed since {ref} under {root}"])
+    return _print_lines(format_impact(artifacts, result, limit, frozenset(), unmapped=unmapped))
+
+
+def _print_lines(lines: list[str]) -> int:
+    print("\n".join(lines))
+    return 0
+
+
+def _print_json(payload: object) -> int:
+    print(json.dumps(payload, indent=2))
     return 0
 
 
