@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
+
+from codemapy.models import SkipReason
 
 
 DEFAULT_IGNORES = {
@@ -34,35 +36,42 @@ DEFAULT_IGNORES = {
     "CMakeFiles",
     "codemapy-report.html",
     "coverage",
-    "db",
     "DerivedData",
     "Debug",
     "dist",
     "grammars",
     "htmlcov",
-    "incremental_db",
-    "netlist",
     "node_modules",
     "Pods",
     "Release",
-    "simulation",
-    "synthesis",
     "target",
     "vendor",
     "venv",
     "Win32",
-    "work",
     "x64",
 }
 
 DEFAULT_IGNORE_DIR_PREFIXES = (
     "cmake-build-",
-    "impl",
 )
 
 DEFAULT_IGNORE_DIR_SUFFIXES = (
     ".egg-info",
 )
+
+# Folders FPGA toolchains write beside their project files: Quartus (db/,
+# incremental_db/, simulation/), Platform Designer (synthesis/), Vivado
+# (<proj>.runs/impl_1/), Lattice Diamond (impl1/) and ModelSim/Questa (work/).
+# The names are ordinary words that real source trees use too (a `src/db/`
+# data layer, a Rust `impl/` module), so they are only skipped when they look
+# like tool output: an FPGA project file in the folder's parent or grandparent,
+# or a compiled HDL library marker inside it.
+TOOL_OUTPUT_DIR_NAMES = frozenset({"db", "incremental_db", "netlist", "simulation", "synthesis", "work"})
+TOOL_OUTPUT_DIR_PREFIXES = ("impl",)
+FPGA_PROJECT_SUFFIXES = (".qpf", ".qsf", ".qsys", ".xpr", ".mpf", ".ldf", ".prjx")
+FPGA_PROJECT_FILES = frozenset({"modelsim.ini"})
+HDL_LIBRARY_MARKERS = ("_info", "_lib.qdb")
+TOOL_PROJECT_SEARCH_LEVELS = 2
 
 PROJECT_METADATA_FILES = {
     ".eslintrc",
@@ -210,6 +219,39 @@ def is_default_ignored_dir_name(name: str) -> bool:
     )
 
 
+def is_tool_output_dir_name(name: str) -> bool:
+    """True if *name* is one an FPGA toolchain uses for its output folders."""
+    normalized = name.lower()
+    return normalized in TOOL_OUTPUT_DIR_NAMES or normalized.startswith(TOOL_OUTPUT_DIR_PREFIXES)
+
+
+def is_tool_output_dir(path: Path) -> bool:
+    """True if the folder at *path* is FPGA tool output rather than source.
+
+    The name alone is not enough (see TOOL_OUTPUT_DIR_NAMES): the folder must
+    hold a compiled HDL library marker, or an FPGA project file must sit in
+    its parent or grandparent (Vivado nests ``impl_1`` one level down, inside
+    ``<proj>.runs/``).
+    """
+    if not is_tool_output_dir_name(path.name):
+        return False
+    if any((path / marker).is_file() for marker in HDL_LIBRARY_MARKERS):
+        return True
+    for parent in list(path.parents)[:TOOL_PROJECT_SEARCH_LEVELS]:
+        try:
+            names = [entry.name for entry in parent.iterdir() if entry.is_file()]
+        except OSError:
+            continue
+        if any(_is_fpga_project_file(name) for name in names):
+            return True
+    return False
+
+
+def _is_fpga_project_file(name: str) -> bool:
+    lowered = name.lower()
+    return lowered in FPGA_PROJECT_FILES or lowered.endswith(FPGA_PROJECT_SUFFIXES)
+
+
 def is_project_metadata_file(path: Path) -> bool:
     name = path.name
     normalized = name.lower()
@@ -252,9 +294,31 @@ class Config:
         so projects with a real ``build/`` or ``db/`` source directory can opt
         back in via ``.codemap.json``.
         """
-        if name.lower() in {kept.lower() for kept in self.keep_dirs}:
-            return False
-        return name in self.ignore_dirs or is_default_ignored_dir_name(name)
+        return self.name_skip_reason(name) is not None
+
+    def name_skip_reason(self, name: str) -> SkipReason | None:
+        """Why a file or directory called *name* is skipped, or None if it is not."""
+        if self._is_kept(name):
+            return None
+        if is_default_ignored_dir_name(name):
+            return SkipReason.DEFAULT_IGNORE
+        if name in self.ignore_dirs:
+            return SkipReason.CONFIG_IGNORE
+        return None
+
+    def dir_skip_reason(self, path: Path) -> SkipReason | None:
+        """Why the directory at *path* is skipped by name, or None if it is not.
+
+        Adds the FPGA tool-output check, which needs the folder's surroundings
+        and so cannot be decided from the name alone.
+        """
+        reason = self.name_skip_reason(path.name)
+        if reason is None and not self._is_kept(path.name) and is_tool_output_dir(path):
+            return SkipReason.TOOL_OUTPUT
+        return reason
+
+    def _is_kept(self, name: str) -> bool:
+        return name.lower() in {kept.lower() for kept in self.keep_dirs}
 
 
 def load_config(root: Path) -> Config:

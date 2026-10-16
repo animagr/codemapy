@@ -1,11 +1,23 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 
 from .deps.registry import extractor_for_ext
 from .deps.resolver import ImportResolver
 from .deps.symbols import extract_module_facts
-from .models import Edge, ExternalImport, FileNode, ModuleNode, Report, ScanResult
+from .models import (
+    Edge,
+    ExternalImport,
+    FileNode,
+    ImportRef,
+    ModuleNode,
+    Report,
+    ScanResult,
+    UnresolvedImport,
+)
+from .testfiles import is_test_file
+from .unresolved import UnresolvedClassifier, unresolved_warnings
 
 # Edge kinds that express containment/declaration rather than a true dependency.
 # A Rust `mod child;` declaration paired with the idiomatic `use super::*` /
@@ -25,10 +37,12 @@ def build_report(root: Path, files: ScanResult | tuple[FileNode, ...]) -> Report
     scan = files if isinstance(files, ScanResult) else ScanResult(sources=tuple(files))
     files = scan.sources
     resolver = ImportResolver(root, files)
-    imports_by_file = {}
+    classifier = UnresolvedClassifier(root, files, scan.skipped)
+    imports_by_file: dict[str, tuple[ImportRef, ...]] = {}
     facts_by_file = {}
     edges: list[Edge] = []
     external: list[ExternalImport] = []
+    unresolved: list[UnresolvedImport] = []
 
     for file in files:
         extractor = extractor_for_ext(file.extension)
@@ -47,7 +61,11 @@ def build_report(root: Path, files: ScanResult | tuple[FileNode, ...]) -> Report
                 continue
             else:
                 kept_refs.append(ref)
-                external.append(ExternalImport(source=file.path, raw=ref.raw, kind=ref.kind))
+                miss = classifier.classify(file, ref, resolver.last_candidates)
+                if miss is not None:
+                    unresolved.append(miss)
+                else:
+                    external.append(ExternalImport(source=file.path, raw=ref.raw, kind=ref.kind))
         imports_by_file[file.path] = tuple(kept_refs)
 
     # Fan-in / fan-out count distinct neighbours, not raw edges, so a file that
@@ -60,6 +78,7 @@ def build_report(root: Path, files: ScanResult | tuple[FileNode, ...]) -> Report
         out_neighbours.setdefault(edge.source, set()).add(edge.target)
         in_neighbours.setdefault(edge.target, set()).add(edge.source)
 
+    test_paths = {file.path for file in files if is_test_file(file.path, imports_by_file[file.path])}
     modules = tuple(
         ModuleNode(
             path=file.path,
@@ -71,6 +90,9 @@ def build_report(root: Path, files: ScanResult | tuple[FileNode, ...]) -> Report
             fan_out=len(out_neighbours.get(file.path, ())),
             symbols=facts_by_file[file.path].symbols,
             has_main_guard=facts_by_file[file.path].has_main_guard,
+            is_test=file.path in test_paths,
+            is_generated=file.is_generated,
+            test_fan_in=len(in_neighbours.get(file.path, set()) & test_paths),
         )
         for file in files
     )
@@ -83,10 +105,33 @@ def build_report(root: Path, files: ScanResult | tuple[FileNode, ...]) -> Report
         modules=modules,
         edges=tuple(edges),
         external_imports=tuple(external),
+        warnings=tuple(unresolved_warnings(unresolved)),
         cycles=cycles,
         metadata_files=scan.metadata_files,
         doc_files=scan.doc_files,
         asset_groups=scan.asset_groups,
+        unresolved_imports=tuple(unresolved),
+    )
+
+
+def hub_rank_key(module: ModuleNode) -> tuple[int, int, int, int, str]:
+    """Sort key for hubs: production importers first, then all importers, fan-out, size."""
+    return (-module.non_test_fan_in, -module.fan_in, -module.fan_out, -module.loc, module.path)
+
+
+def production_hubs(modules: Iterable[ModuleNode]) -> list[ModuleNode]:
+    """Connected modules that are neither tests nor generated, best hubs first.
+
+    Tests are left out because they rank by what they import, not by what
+    depends on them, and generated stubs because nobody edits them.
+    """
+    return sorted(
+        (
+            module
+            for module in modules
+            if (module.fan_in or module.fan_out) and not module.is_test and not module.is_generated
+        ),
+        key=hub_rank_key,
     )
 
 

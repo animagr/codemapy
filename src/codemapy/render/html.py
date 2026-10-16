@@ -6,6 +6,7 @@ from pathlib import Path
 
 from codemapy.entrypoints import entry_points
 from codemapy.models import ModuleNode, Report
+from codemapy.unresolved import describe_group, group_unresolved, reason_value
 
 # Top-level symbols embedded per file for the details panel. Full nested
 # detail lives in symbols.json; the report only needs a browsable outline.
@@ -30,6 +31,10 @@ def render_html(report: Report) -> str:
         f'<span class="chip warn">&#9888; {cycle_count} cycles</span>'
         if cycle_count
         else '<span class="chip">0 cycles</span>'
+    )
+    unresolved_count = len(report.unresolved_imports)
+    unresolved_chip = (
+        f'<span class="chip warn">&#9888; {unresolved_count} unresolved</span>' if unresolved_count else ""
     )
     return f"""<!doctype html>
 <html lang="en">
@@ -157,6 +162,7 @@ section {{ background: var(--panel); min-width: 0; min-height: 0; overflow: hidd
     <span class="chip">{len(report.external_imports)} external refs</span>
     <span class="chip">{total_symbols} symbols</span>
     {cycles_chip}
+    {unresolved_chip}
   </div>
 </header>
 <div id="legend"></div>
@@ -179,6 +185,7 @@ section {{ background: var(--panel); min-width: 0; min-height: 0; overflow: hidd
     <div class="insight-block"><h3>Entry Points</h3><ul id="entryList"></ul></div>
     <div class="insight-block"><h3>Top Hubs</h3><ul id="hubList"></ul></div>
     <div class="insight-block"><h3>Dependency Cycles</h3><ul id="cycleList"></ul></div>
+    <div class="insight-block"><h3>Unresolved Internal Imports</h3><ul id="unresolvedList"></ul></div>
   </section>
 </main>
 <script>
@@ -290,17 +297,33 @@ function renderEntryPoints() {{
 function renderHubs() {{
   const list = document.getElementById("hubList");
   list.innerHTML = "";
+  // Same ranking as summary.md: production modules by non-test fan-in.
+  const prodIn = module => module.fan_in - module.test_fan_in;
   const hubs = report.modules
-    .filter(module => module.fan_in || module.fan_out)
-    .sort((a, b) => b.fan_in - a.fan_in || b.fan_out - a.fan_out || a.path.localeCompare(b.path))
+    .filter(module => (module.fan_in || module.fan_out) && !module.is_test && !module.is_generated)
+    .sort((a, b) => prodIn(b) - prodIn(a) || b.fan_in - a.fan_in || b.fan_out - a.fan_out || a.path.localeCompare(b.path))
     .slice(0, 10);
   if (!hubs.length) {{
-    list.appendChild(li(subtle("No internal dependency edges detected")));
+    const note = report.edges.length
+      ? `None: all ${{report.edges.length}} internal dependency edges are between test or generated files`
+      : "No internal dependency edges detected";
+    list.appendChild(li(subtle(note)));
     return;
   }}
   hubs.forEach(module => {{
-    list.appendChild(li(fileLink(module.path), " ", subtle(`in ${{module.fan_in}} · out ${{module.fan_out}}`)));
+    const tests = module.test_fan_in ? ` (${{module.test_fan_in}} from tests)` : "";
+    list.appendChild(li(fileLink(module.path), " ", subtle(`in ${{module.fan_in}}${{tests}} · out ${{module.fan_out}}`)));
   }});
+}}
+
+function renderUnresolved() {{
+  const list = document.getElementById("unresolvedList");
+  list.innerHTML = "";
+  if (!report.unresolved_groups.length) {{
+    list.appendChild(li(subtle("None")));
+    return;
+  }}
+  report.unresolved_groups.forEach(text => list.appendChild(li(text)));
 }}
 
 function renderCycles() {{
@@ -341,14 +364,27 @@ function renderDetails() {{
   const parts = [];
   if (file) parts.push(file.language || "Other", `${{file.loc}} loc`, `${{file.size}} bytes`);
   if (module) parts.push(`fan-in ${{module.fan_in}}`, `fan-out ${{module.fan_out}}`);
+  if (module && module.is_test) parts.push("test file");
+  if (module && module.is_generated) parts.push("generated");
   facts.textContent = parts.join(" · ");
   panel.appendChild(facts);
 
   const outgoing = report.edges.filter(edge => edge.source === selected).map(edge => edge.target);
   const incoming = report.edges.filter(edge => edge.target === selected).map(edge => edge.source);
   const externals = [...new Set(report.external.filter(item => item.source === selected).map(item => item.raw))];
+  const unresolved = report.unresolved.filter(item => item.source === selected);
   appendLinkList(panel, "Depends on", [...new Set(outgoing)]);
   appendLinkList(panel, "Used by", [...new Set(incoming)]);
+  if (unresolved.length) {{
+    appendHeading(panel, `Unresolved imports (${{unresolved.length}})`);
+    const list = document.createElement("ul");
+    unresolved.slice(0, 12).forEach(item => {{
+      const why = item.hidden_by ? `${{item.reason}}: ${{item.hidden_by}}` : item.reason;
+      list.appendChild(li(`${{item.raw}} `, subtle(`:${{item.line}} (${{why}})`)));
+    }});
+    if (unresolved.length > 12) list.appendChild(li(subtle(`... and ${{unresolved.length - 12}} more`)));
+    panel.appendChild(list);
+  }}
   if (externals.length) {{
     appendHeading(panel, `External refs (${{externals.length}})`);
     const list = document.createElement("ul");
@@ -485,6 +521,7 @@ renderTree();
 renderEntryPoints();
 renderHubs();
 renderCycles();
+renderUnresolved();
 drawTreemap();
 drawGraph();
 </script>
@@ -513,6 +550,9 @@ def _report_payload(report: Report) -> dict[str, object]:
                 "size": module.size,
                 "fan_in": module.fan_in,
                 "fan_out": module.fan_out,
+                "test_fan_in": module.test_fan_in,
+                "is_test": module.is_test,
+                "is_generated": module.is_generated,
                 "symbols": _symbol_outline(module),
                 "symbols_omitted": max(0, len(module.symbols) - MAX_HTML_SYMBOLS_PER_FILE),
                 "symbol_count": sum(len(symbol.flatten()) for symbol in module.symbols),
@@ -526,6 +566,20 @@ def _report_payload(report: Report) -> dict[str, object]:
         "external": [
             {"source": item.source, "raw": item.raw, "kind": item.kind}
             for item in report.external_imports
+        ],
+        "unresolved": [
+            {
+                "source": item.source,
+                "raw": item.raw,
+                "line": item.line,
+                "reason": reason_value(item),
+                "hidden_by": item.hidden_by,
+            }
+            for item in report.unresolved_imports
+        ],
+        # Markdown backticks are dropped: the panel renders plain text.
+        "unresolved_groups": [
+            describe_group(group).replace("`", "") for group in group_unresolved(report.unresolved_imports)
         ],
         "entry_points": [
             {"name": entry.name, "target": entry.target, "path": entry.path, "note": entry.note}

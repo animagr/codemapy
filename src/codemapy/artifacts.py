@@ -9,13 +9,17 @@ from pathlib import Path
 from codemapy import gitinfo
 from codemapy.config import load_config
 from codemapy.entrypoints import entry_points
-from codemapy.models import AuxFile, ModuleNode, Report, Symbol
+from codemapy.graph import hub_rank_key, production_hubs
+from codemapy.models import AuxFile, ModuleNode, Report, Symbol, UnresolvedImport
 from codemapy.render.html import write_html
 from codemapy.scanner import scan_project
+from codemapy.unresolved import describe_group, group_unresolved, reason_value
 
 
 ARTIFACT_DIR_NAME = ".codemapy"
-ARTIFACT_VERSION = 2
+# 3: unresolved_imports split out of external_imports; modules gained
+# is_test, is_generated and test_fan_in; hubs rank by non-test fan-in.
+ARTIFACT_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -136,6 +140,9 @@ def report_payload(report: Report) -> dict[str, object]:
             "size": report.total_size,
             "internal_dependencies": len(report.edges),
             "external_references": len(report.external_imports),
+            "unresolved_imports": len(report.unresolved_imports),
+            "test_files": len(_test_modules(report)),
+            "generated_files": len(_generated_modules(report)),
             "symbols": sum(_symbol_count(module.symbols) for module in report.modules),
             "cycles": len(report.cycles),
             "doc_files": len(report.doc_files),
@@ -176,6 +183,11 @@ def report_payload(report: Report) -> dict[str, object]:
                 # can be run directly. Paired with fan_in == 0 this is what
                 # promotes a file to an entry point.
                 "has_main_guard": module.has_main_guard,
+                "is_test": module.is_test,
+                "is_generated": module.is_generated,
+                # Importers that are test files; fan_in - test_fan_in is what
+                # production code depends on, and what hubs are ranked by.
+                "test_fan_in": module.test_fan_in,
             }
             for module in report.modules
         ],
@@ -187,9 +199,29 @@ def report_payload(report: Report) -> dict[str, object]:
             {"source": item.source, "raw": item.raw, "kind": item.kind}
             for item in report.external_imports
         ],
+        "unresolved_imports": [_unresolved_payload(item) for item in report.unresolved_imports],
         "cycles": [list(cycle) for cycle in report.cycles],
         "warnings": list(report.warnings),
     }
+
+
+def _unresolved_payload(item: UnresolvedImport) -> dict[str, object]:
+    return {
+        "source": item.source,
+        "raw": item.raw,
+        "kind": item.kind,
+        "line": item.line,
+        "reason": reason_value(item),
+        "hidden_by": item.hidden_by,
+    }
+
+
+def _test_modules(report: Report) -> list[ModuleNode]:
+    return [module for module in report.modules if module.is_test]
+
+
+def _generated_modules(report: Report) -> list[ModuleNode]:
+    return [module for module in report.modules if module.is_generated]
 
 
 def _aux_payload(item: AuxFile) -> dict[str, object]:
@@ -249,24 +281,33 @@ def _symbol_count(symbols: tuple[Symbol, ...]) -> int:
     return sum(1 + _symbol_count(symbol.children) for symbol in symbols)
 
 
+MAX_TOP_HUBS = 20
+
+
 def hubs_payload(report: Report) -> dict[str, object]:
-    hubs = sorted(
-        report.modules,
-        key=lambda module: (-module.fan_in, -module.fan_out, -module.loc, module.path),
+    """Every connected module, plus the top production hubs by fan-in and fan-out.
+
+    ``hubs`` keeps test and generated modules (flagged) for completeness; the
+    ``top_*`` lists leave them out and rank by non-test fan-in.
+    """
+    active = sorted(
+        (module for module in report.modules if module.fan_in or module.fan_out), key=hub_rank_key
     )
-    active = [module for module in hubs if module.fan_in or module.fan_out]
+    production = production_hubs(report.modules)
     return {
         "version": ARTIFACT_VERSION,
         "hubs": [_module_payload(module) for module in active],
-        "top_fan_in": [_module_payload(module) for module in hubs if module.fan_in][:20],
+        "top_fan_in": [
+            _module_payload(module) for module in production if module.non_test_fan_in
+        ][:MAX_TOP_HUBS],
         "top_fan_out": [
             _module_payload(module)
             for module in sorted(
-                report.modules,
-                key=lambda module: (-module.fan_out, -module.fan_in, -module.loc, module.path),
+                production,
+                key=lambda module: (-module.fan_out, -module.non_test_fan_in, -module.loc, module.path),
             )
             if module.fan_out
-        ][:20],
+        ][:MAX_TOP_HUBS],
     }
 
 
@@ -299,6 +340,9 @@ def manifest_payload(
             "loc": report.total_loc,
             "internal_dependencies": len(report.edges),
             "external_references": len(report.external_imports),
+            "unresolved_imports": len(report.unresolved_imports),
+            "test_files": len(_test_modules(report)),
+            "generated_files": len(_generated_modules(report)),
             "symbols": sum(_symbol_count(module.symbols) for module in report.modules),
             "cycles": len(report.cycles),
         },
@@ -349,12 +393,17 @@ def summary_markdown(
     if git_commit:
         dirty_note = " (dirty working tree)" if git_dirty else ""
         lines.append(f"- Git commit: `{git_commit[:12]}`{dirty_note}")
+    tests = _test_modules(report)
+    generated = _generated_modules(report)
     lines.extend(
         [
             f"- Files: {len(report.files)}",
             f"- LOC: {report.total_loc}",
+            f"- Test files: {len(tests)} ({sum(module.loc for module in tests)} loc)",
+            f"- Generated files: {len(generated)} ({sum(module.loc for module in generated)} loc)",
             f"- Internal dependencies: {len(report.edges)}",
             f"- External references: {len(report.external_imports)}",
+            f"- Unresolved internal imports: {len(report.unresolved_imports)}",
             f"- Symbols: {sum(_symbol_count(module.symbols) for module in report.modules)}",
             f"- Dependency cycles: {len(report.cycles)}",
             "",
@@ -378,14 +427,7 @@ def summary_markdown(
     lines.extend(entry_points if entry_points else ["- None detected"])
 
     lines.extend(["", "## Top Hubs", ""])
-    hubs = [module for module in _ranked_modules(report) if module.fan_in or module.fan_out][:10]
-    if hubs:
-        lines.extend(
-            f"- `{module.path}`: fan-in {module.fan_in}, fan-out {module.fan_out}, {module.loc} loc"
-            for module in hubs
-        )
-    else:
-        lines.append("- No internal dependency edges detected")
+    lines.extend(_hub_lines(report))
 
     lines.extend(["", "## Largest Files", ""])
     largest = sorted(report.files, key=lambda file: (-file.loc, file.path))[:10]
@@ -402,6 +444,13 @@ def summary_markdown(
             lines.append(f"- ... and {len(report.cycles) - 20} more")
     else:
         lines.append("- None detected")
+
+    lines.extend(["", "## Unresolved Internal Imports", ""])
+    lines.extend(_unresolved_lines(report))
+
+    if generated:
+        lines.extend(["", "## Generated Files", ""])
+        lines.extend(_generated_lines(generated))
 
     lines.extend(["", "## Symbols by Kind", ""])
     kind_counts = _symbol_kind_counts(report)
@@ -437,9 +486,10 @@ def summary_markdown(
             "",
             "## Artifact Guide",
             "",
-            "- `context.json`: full scan data - files, imports, dependency edges, cycles, per-file symbol counts",
+            "- `context.json`: full scan data - files, imports, dependency edges, unresolved internal imports "
+            "with their reasons, cycles, per-file symbol counts, and test / generated flags",
             "- `symbols.json`: per-file definitions plus an `index` mapping each defined name to its locations",
-            "- `hubs.json`: modules ranked by fan-in / fan-out",
+            "- `hubs.json`: modules ranked by non-test fan-in and by fan-out",
             "- `manifest.json`: generation metadata, artifact byte sizes, and `git_commit` for staleness checks",
             "- `report.html`: visual file tree, treemap, dependency graph, and insights "
             "(entry points, hubs, cycles, per-file symbols) for humans",
@@ -527,11 +577,55 @@ def _asset_lines(report: Report) -> list[str]:
     return lines
 
 
-def _ranked_modules(report: Report) -> list[ModuleNode]:
-    return sorted(
-        report.modules,
-        key=lambda module: (-module.fan_in, -module.fan_out, -module.loc, module.path),
-    )
+MAX_SUMMARY_HUBS = 10
+MAX_UNRESOLVED_GROUPS = 10
+MAX_GENERATED_FILES = 15
+
+
+def _hub_lines(report: Report) -> list[str]:
+    hubs = production_hubs(report.modules)[:MAX_SUMMARY_HUBS]
+    if not hubs and report.edges:
+        edges = "the only internal dependency edge is" if len(report.edges) == 1 else (
+            f"all {len(report.edges)} internal dependency edges are"
+        )
+        return [f"- None: {edges} between test or generated files"]
+    if not hubs:
+        return ["- No internal dependency edges detected"]
+    lines = []
+    for module in hubs:
+        tests_note = f" ({module.test_fan_in} from tests)" if module.test_fan_in else ""
+        lines.append(
+            f"- `{module.path}`: fan-in {module.fan_in}{tests_note}, "
+            f"fan-out {module.fan_out}, {module.loc} loc"
+        )
+    return lines
+
+
+def _unresolved_lines(report: Report) -> list[str]:
+    if not report.unresolved_imports:
+        return ["- None: every import that names a project file resolved to a mapped one"]
+    groups = group_unresolved(report.unresolved_imports)
+    lines = [
+        f"{_count_imports(len(report.unresolved_imports))} name a project file but did not resolve "
+        "to a mapped source file, so the edges they stand for are missing from this map.",
+        "",
+    ]
+    lines.extend(f"- {describe_group(group)}" for group in groups[:MAX_UNRESOLVED_GROUPS])
+    if len(groups) > MAX_UNRESOLVED_GROUPS:
+        lines.append(f"- ... and {len(groups) - MAX_UNRESOLVED_GROUPS} more causes (see `context.json`)")
+    return lines
+
+
+def _generated_lines(generated: list[ModuleNode]) -> list[str]:
+    ordered = sorted(generated, key=lambda module: module.path)
+    lines = [f"- `{module.path}` ({module.loc} loc)" for module in ordered[:MAX_GENERATED_FILES]]
+    if len(ordered) > MAX_GENERATED_FILES:
+        lines.append(f"- ... and {len(ordered) - MAX_GENERATED_FILES} more")
+    return lines
+
+
+def _count_imports(count: int) -> str:
+    return f"{count} import" if count == 1 else f"{count} imports"
 
 
 LARGE_CYCLE_THRESHOLD = 8
@@ -592,6 +686,9 @@ def _module_payload(module: ModuleNode) -> dict[str, object]:
         "size": module.size,
         "fan_in": module.fan_in,
         "fan_out": module.fan_out,
+        "test_fan_in": module.test_fan_in,
+        "is_test": module.is_test,
+        "is_generated": module.is_generated,
     }
 
 

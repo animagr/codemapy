@@ -15,6 +15,8 @@ This is a fresh implementation inspired by the Go `codemap/` project, with a del
 - JavaScript, TypeScript, and C/C++ imports parsed with tree-sitter (regex fallback)
 - symbol-level definitions (functions, classes, methods, ...) extracted across tree-sitter-covered languages
 - circular-dependency detection via strongly-connected components
+- test and generated files classified, so hubs and entry points describe the program rather than its test suite or codegen output
+- imports that name a project file but miss the map are reported with the reason, instead of passing as external references
 - HTML report generated with embedded CSS/JS
 
 ## Parsing Backend
@@ -49,7 +51,7 @@ Requires Python 3.11+.
 
 `codemapy` supports three levels of language handling:
 
-- **Dependency graph support** (imports resolved to internal edges): Python (`.py`), JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`), TypeScript (`.ts`, `.tsx`), Svelte (`.svelte`), GDScript (`.gd`, including `class_name` usage and `project.godot` autoload singletons), Lua (`.lua`), Rust (`.rs`), C# (`.cs`, via `using`/namespace resolution filtered by referenced type names), C/C++ includes (`.c`, `.h`, `.cc`, `.cpp`, `.cxx`, `.hpp`), and basic Verilog/SystemVerilog (`.v`, `.vh`, `.sv`, `.svh`)
+- **Dependency graph support** (imports resolved to internal edges): Python (`.py`, including `from package import submodule` and namespace packages), JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`), TypeScript (`.ts`, `.tsx`), Svelte (`.svelte`), GDScript (`.gd`, including `class_name` usage and `project.godot` autoload singletons), Lua (`.lua`), Rust (`.rs`), C# (`.cs`, via `using`/namespace resolution filtered by referenced type names), C/C++ includes (`.c`, `.h`, `.cc`, `.cpp`, `.cxx`, `.hpp`), and basic Verilog/SystemVerilog (`.v`, `.vh`, `.sv`, `.svh`)
 - **Symbol extraction** (functions, classes, methods, structs, etc. recorded in `symbols.json`, counted per file in `context.json`): Python (`ast`, with signatures and docstrings), and via tree-sitter — JavaScript, TypeScript, Go, Rust, Java, C#, Ruby, C, C++, Lua, GDScript (classes, functions, signals, enums), Verilog/SystemVerilog (modules, functions, tasks), and Bash/shell scripts. Definitions are nested by span, so methods carry their declaring class and the symbol index records qualified names such as `Widget.update`.
 - **File scanning, LOC counts, tree, and treemap labels:** Python, JavaScript, TypeScript, Svelte, GDScript, Verilog, SystemVerilog, Go, Rust, Ruby, Java, C#, C, C++, Swift, Kotlin, PHP, Lua, Scala, Elixir, Solidity, and shell scripts
 
@@ -120,7 +122,9 @@ An optional `.codemap.json` in the project root tunes the scan:
 }
 ```
 
-`keep_dirs` re-includes directory names that the built-in defaults would ignore (useful when a project has a real `build/` or `db/` source directory).
+`keep_dirs` re-includes directory names that the built-in defaults would ignore (useful when a project has a real `build/` or `dist/` source directory).
+
+The folder names FPGA toolchains use for their output (`db`, `incremental_db`, `netlist`, `simulation`, `synthesis`, `work`, and `impl*`) are skipped only when they look like tool output: an FPGA project file (`.qpf`, `.qsf`, `.qsys`, `.xpr`, `.mpf`, `.ldf`, `.prjx`, or `modelsim.ini`) sits in the folder's parent or grandparent, or the folder holds a compiled HDL library marker (`_info`, `_lib.qdb`). Elsewhere they are ordinary source folders, such as a `src/db/` data layer or a Rust `impl/` module. `keep_dirs` overrides the check as well.
 
 ## Agent Artifacts
 
@@ -132,10 +136,10 @@ python -m codemapy <path> --artifacts
 
 Generated files:
 
-- `report.html` - human-readable file tree, treemap, dependency graph, and an insights panel with entry points, top hubs, dependency cycles, and per-file details (dependencies, external references, symbol outline)
-- `context.json` - full machine-readable scan data for AI agents, including imports, per-file symbol counts, a `has_main_guard` flag marking directly runnable Python files, dependency edges, circular-dependency groups, documentation files, asset summaries, and project metadata files such as lockfiles and config files (full symbol detail lives in `symbols.json`)
-- `summary.md` - compact project briefing for agent context: languages, a directory overview, entry points, top hubs, largest files, dependency cycles, symbols by kind, external references, documentation and metadata files, and a guide to the other artifacts
-- `hubs.json` - fan-in/fan-out sorted dependency data
+- `report.html` - human-readable file tree, treemap, dependency graph, and an insights panel with entry points, top hubs, dependency cycles, unresolved internal imports, and per-file details (dependencies, external references, unresolved imports, symbol outline)
+- `context.json` - full machine-readable scan data for AI agents, including imports, per-file symbol counts, a `has_main_guard` flag marking directly runnable Python files, `is_test` / `is_generated` flags and `test_fan_in` (importers that are tests) per module, dependency edges, unresolved internal imports with their reasons, circular-dependency groups, documentation files, asset summaries, and project metadata files such as lockfiles and config files (full symbol detail lives in `symbols.json`)
+- `summary.md` - compact project briefing for agent context: languages, test and generated file counts, a directory overview, entry points, top hubs, largest files, dependency cycles, unresolved internal imports grouped by cause, generated files, symbols by kind, external references, documentation and metadata files, and a guide to the other artifacts
+- `hubs.json` - every connected module, plus the top production hubs ranked by non-test fan-in and by fan-out
 - `symbols.json` - per-file definitions plus a flat name index (`name -> [{path, qualified_name, kind, line}]`) so an agent can locate "where is X defined?" directly
 - `manifest.json` - artifact metadata, counts, per-file byte sizes, and the git commit/dirty state at generation time (used by `--check` for staleness)
 
@@ -149,11 +153,32 @@ If `.codemapy/` already exists, codemapy asks before rewriting it. Use `--yes` t
 `summary.md` and the report's insights panel list detected entry points, from four signals in descending order of strength:
 
 1. **Manifest scripts** - `[project.scripts]` / `[project.gui-scripts]` in `pyproject.toml`, and `main` / `bin` in `package.json`, including manifests up to three directories deep.
-2. **Well-known basenames** near the root - `main.py`, `app.py`, `manage.py`, `index.ts`, `main.rs`, and similar.
+2. **Well-known basenames** near the root - `main.py`, `app.py`, `manage.py`, `index.ts`, `main.rs`, and similar. `index.js` / `index.ts` count only as a package's own index: directly in the root or a folder holding a `package.json`, or in that folder's `src/` or `lib/`. Others are usually barrel files that re-export a folder.
 3. **A top-level `main()`** in C, C++, Go, or Rust, annotated `(defines main())`. This works at any depth, so it catches firmware entry points in oddly named files.
 4. **A top-level `if __name__ == "__main__":` guard** in Python, annotated `(__main__ guard)`.
 
 The guard is the weakest signal and is filtered accordingly: library modules very often carry one as a manual smoke-test harness, so a guarded file is only promoted to an entry point when **nothing imports it** (fan-in 0). Guard-only entries are ranked by fan-out — the module pulling in the most of the codebase is the application, not the demo block — and at most three are listed, so they can never crowd out the stronger signals. A guard on a file that another signal already found just adds the annotation.
+
+Test and generated files (see below) are never promoted by signals 2-4.
+
+### Test and Generated Files
+
+Test files stay in the map but are flagged `is_test`, because a test suite imports broadly and nothing imports it: counted like the program, it inflates every hub's fan-in and crowds the fan-out and entry-point lists. Hubs are therefore ranked by importers that are not tests, and `summary.md` shows the test share, for example `fan-in 487 (457 from tests)`. A file is a test when:
+
+- it sits in a test directory (`tests/`, `test/`, `__tests__/`, `spec/`, `testdata/`, `fixtures/`, `e2e/`, `testbench/`, or a case-sensitive `...Test/`, `...Tests/`, `...Spec/` such as `jvmTest/` or `Foo.Tests/`), or
+- its name is reserved for tests (`_test.go`, `.test.ts` / `.spec.ts`, `FooTest.java`, `FooTests.cs`, `foo_spec.rb`, HDL testbenches `tb_*.v` / `*_tb.sv`, ...), or
+- for Python and C/C++, its name is test-like (`test_*.py`, `*_test.py`, `*_test.c`, `*_unittest.cc`) **and** it imports a test framework (`pytest` / `unittest`, gtest, Catch2, Unity, CppUTest, ...). In instrument and firmware code a `*_test.py` is often the test-bench application itself and a `flash_test.c` a production self-test, so the name alone is not enough. `conftest.py` always counts.
+
+Generated files are flagged `is_generated` and listed in `summary.md`. They stay in the graph, so imports of them still resolve, but they are left out of hubs and entry points. Detection (ported from codegraph) uses three signals: a code generator's filename (`_pb2.py`, `.pb.go`, `.g.cs`, `OuterClass.java`, ...), a generator banner on a comment line in the first 60 lines (`Code generated ... DO NOT EDIT`, `@generated`, `<auto-generated>`, ...), or a minified or bundled JavaScript file. A banner from a one-time scaffolding step (Gradle `init`, `rspec --init`, `rails generate rspec:install`) does not count, because the project owns and edits that file afterwards.
+
+### Unresolved Internal Imports
+
+An import that names a project file but does not resolve to a mapped one is reported as unresolved, not as an external reference. Each one records why its target is missing from the map:
+
+- **A skip rule hid it.** The target exists on disk inside something the scan skipped, and the reason names the rule: `default-ignore`, `tool-output`, `config-ignore`, `gitignore`, `exclude`, `only-filter`, `too-large`, or `build-output`. `hidden_by` names the skipped folder or file. When your own configuration or the FPGA tool-output rule hid the target (`config-ignore`, `exclude`, `only-filter`, `too-large`, `tool-output`), a warning also prints on stderr with the `.codemap.json` change that would map it. The built-in names (`vendor/`, `dist/`, `node_modules/`, ...), `.gitignore`, and build outputs hide third-party or built code on purpose, so imports into them are listed but not warned about. Only source files count: an import of `../vendor/ui.min.css` is not an unresolved edge.
+- **No file exists** (`missing`). Only imports whose syntax can name nothing but a project file count here: relative JS/TS script paths, relative C/C++ includes, Rust `mod x;`, Python relative imports and imports rooted at a top-level project module, and GDScript `.gd` paths. An extensionless JS/TS path that names a `.json` file, and a Python folder of modules without `__init__.py` (a namespace package), are not missing. The target may be generated at build time, or the import may be stale.
+
+`summary.md` groups them by cause with examples, `context.json` lists each one under `unresolved_imports`, and `report.html` shows them in the insights panel and in each file's details.
 
 To write a one-off standalone HTML file outside the artifact folder:
 

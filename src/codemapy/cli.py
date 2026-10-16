@@ -133,7 +133,7 @@ def _subfolders(root: Path) -> tuple[list[Path], list[str]]:
     for child in sorted(root.iterdir(), key=lambda item: item.name.lower()):
         if not child.is_dir():
             continue
-        if child.name.startswith(".") or config.is_ignored_name(child.name):
+        if child.name.startswith(".") or config.dir_skip_reason(child) is not None:
             skipped.append(child.name)
         else:
             projects.append(child.resolve())
@@ -158,6 +158,9 @@ def _map_project(root: Path, args: argparse.Namespace, json_batch: list[dict[str
     """
     config = merge_cli_config(load_config(root), args.only, args.exclude)
     report = build_report(root, scan_project(root, config))
+    # stderr, so --json output on stdout stays parseable.
+    for warning in report.warnings:
+        print(f"Warning: {warning}", file=sys.stderr)
 
     if json_batch is not None:
         json_batch.append(report_payload(report))

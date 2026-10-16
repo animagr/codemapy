@@ -11,7 +11,7 @@ if __package__ in {None, ""}:
 
 from .artifacts import ArtifactPaths, artifact_dir_for, write_artifacts
 from .config import load_config, merge_cli_config
-from .graph import build_report
+from .graph import build_report, production_hubs
 from .scanner import scan_project
 
 
@@ -176,13 +176,16 @@ def _summary_text(report, artifact_paths: ArtifactPaths) -> str:
         languages = ", ".join(f"{name} ({count})" for name, count in report.languages.items())
         lines.append(f"Languages: {languages}")
 
-    hubs = sorted(report.modules, key=lambda module: (-module.fan_in, module.path))[:5]
-    hubs = [module for module in hubs if module.fan_in > 0]
+    hubs = [module for module in production_hubs(report.modules) if module.non_test_fan_in > 0][:5]
     if hubs:
         lines.append("")
         lines.append("Top imported files:")
         for module in hubs:
-            lines.append(f"  {module.path} ({module.fan_in} importers)")
+            tests_note = f", {module.test_fan_in} from tests" if module.test_fan_in else ""
+            lines.append(f"  {module.path} ({module.fan_in} importers{tests_note})")
+    if report.unresolved_imports:
+        lines.append("")
+        lines.append(f"Unresolved internal imports: {len(report.unresolved_imports)} (see summary.md)")
 
     return "\n".join(lines)
 

@@ -15,6 +15,10 @@ nothing imports is a program, whereas a runnable file that other modules import
 is a library with a demo block. Guard-only entries are therefore ranked by
 fan-out (the module that pulls in the most of the codebase is the application)
 and capped, so they can never crowd out manifest or ``main()`` evidence.
+
+Test and generated files are never promoted by the basename, ``main()`` or
+guard signals: a test runner's harness is not the program, and a test suite
+would otherwise claim every guard slot. Manifest scripts are taken as written.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from codemapy.models import Report
+from codemapy.testfiles import is_test_file
 
 ENTRY_POINT_BASENAMES = {
     "__main__.py",
@@ -58,13 +63,14 @@ MAX_ENTRY_POINT_DEPTH = 3
 # MAX_ENTRY_POINTS: in a repo where every module has a demo block, the tail of
 # this list is noise, and the strong signals must keep their slots.
 MAX_MAIN_GUARD_ENTRIES = 3
-# Test modules are excluded from guard promotion: `unittest.main()` under a
-# guard is boilerplate in every test file, they import broadly (so they rank
-# high on fan-out) and nothing imports them, which would otherwise let a test
-# suite claim every guard slot. Only a containing directory counts as evidence,
-# never the filename -- `test_*.py` / `*_test.py` at the root is as often the
-# application itself (e.g. an instrument test bench) as it is a test module.
-TEST_DIRECTORY_NAMES = {"test", "tests"}
+
+# `index.js` / `index.ts` are usually barrel files that re-export a folder's
+# modules (codegraph has a dozen under src/). Only a package-level one is an
+# entry point: directly in a package folder (the root, or any folder holding a
+# package.json) or in that folder's `src/` or `lib/`.
+BARREL_BASENAMES = {"index.js", "index.ts"}
+PACKAGE_SOURCE_DIRS = {"src", "lib"}
+PACKAGE_MANIFEST = "package.json"
 
 
 @dataclass(frozen=True)
@@ -105,14 +111,25 @@ def entry_points(report: Report) -> list[EntryPoint]:
     # Well-known basenames near the root, plus any file whose symbols define
     # a top-level main() (allowed at any depth: it is direct evidence, where
     # basename matching is only a naming convention).
+    excluded = _test_or_generated_paths(report)
+    package_dirs = {""} | {
+        _parent_dir(item.path)
+        for item in report.metadata_files
+        if item.path.rsplit("/", 1)[-1].lower() == PACKAGE_MANIFEST
+    }
     candidates: dict[str, str | None] = {
         file.path: None
         for file in report.files
-        if file.path.rsplit("/", 1)[-1].lower() in ENTRY_POINT_BASENAMES
-        and len(file.path.split("/")) <= MAX_ENTRY_POINT_DEPTH
+        if _is_entry_basename(file.path, package_dirs) and file.path not in excluded
     }
-    guarded = {module.path: module for module in report.modules if module.has_main_guard}
+    guarded = {
+        module.path: module
+        for module in report.modules
+        if module.has_main_guard and module.path not in excluded
+    }
     for module in report.modules:
+        if module.path in excluded:
+            continue
         if module.language in MAIN_FUNCTION_LANGUAGES and any(
             symbol.kind == "function" and symbol.name == "main" for symbol in module.symbols
         ):
@@ -132,7 +149,7 @@ def entry_points(report: Report) -> list[EntryPoint]:
     unimported = [
         module
         for path, module in guarded.items()
-        if path not in candidates and module.fan_in == 0 and not _is_test_module(path)
+        if path not in candidates and module.fan_in == 0
     ]
     unimported.sort(key=lambda module: (-module.fan_out, module.path))
     entries.extend(
@@ -142,9 +159,37 @@ def entry_points(report: Report) -> list[EntryPoint]:
     return entries[:MAX_ENTRY_POINTS]
 
 
-def _is_test_module(path: str) -> bool:
-    """True if *path* sits under a test directory (see TEST_DIRECTORY_NAMES)."""
-    return any(part.lower() in TEST_DIRECTORY_NAMES for part in path.split("/")[:-1])
+def _is_entry_basename(path: str, package_dirs: set[str]) -> bool:
+    parts = path.split("/")
+    basename = parts[-1].lower()
+    if basename not in ENTRY_POINT_BASENAMES or len(parts) > MAX_ENTRY_POINT_DEPTH:
+        return False
+    if basename not in BARREL_BASENAMES:
+        return True
+    directory = _parent_dir(path)
+    if directory in package_dirs:
+        return True
+    in_source_dir = directory.rsplit("/", 1)[-1].lower() in PACKAGE_SOURCE_DIRS
+    return in_source_dir and _parent_dir(directory) in package_dirs
+
+
+def _parent_dir(path: str) -> str:
+    return path.rsplit("/", 1)[0] if "/" in path else ""
+
+
+def _test_or_generated_paths(report: Report) -> set[str]:
+    """Paths that no basename, ``main()`` or guard signal may promote.
+
+    The flags set by ``build_report`` are re-derived from the path and imports
+    as well, so hand-built reports are classified the same way.
+    """
+    excluded = {
+        module.path
+        for module in report.modules
+        if module.is_test or module.is_generated or is_test_file(module.path, module.imports)
+    }
+    excluded.update(file.path for file in report.files if file.is_generated or is_test_file(file.path))
+    return excluded
 
 
 def _pyproject_scripts(path: Path, rel: str) -> list[EntryPoint]:

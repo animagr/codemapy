@@ -29,7 +29,8 @@ class PythonExtractor(DependencyExtractor):
                 module = node.module or ""
                 prefix = "." * node.level
                 if module:
-                    refs.append(ImportRef(raw=prefix + module, kind="from", line=node.lineno))
+                    names = tuple(alias.name for alias in node.names)
+                    refs.append(ImportRef(raw=prefix + module, kind="from", line=node.lineno, names=names))
                 else:
                     for alias in node.names:
                         refs.append(ImportRef(raw=prefix + alias.name, kind="from", line=node.lineno))

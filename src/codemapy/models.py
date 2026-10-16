@@ -1,24 +1,64 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 
 
 @dataclass(frozen=True)
 class FileNode:
+    """A scanned source file.
+
+    ``is_generated`` marks machine-written code (a ``DO NOT EDIT`` banner, a
+    codegen filename such as ``_pb2.py``, or a minified script). Such files
+    stay in the graph so imports of them still resolve, but they are kept out
+    of hub and entry-point rankings.
+    """
+
     path: str
     absolute_path: Path
     size: int
     loc: int
     extension: str
     language: str
+    is_generated: bool = False
+
+
+class SkipReason(StrEnum):
+    """Why the scanner left a file or directory out of the map."""
+
+    DEFAULT_IGNORE = "default-ignore"
+    TOOL_OUTPUT = "tool-output"
+    CONFIG_IGNORE = "config-ignore"
+    GITIGNORE = "gitignore"
+    EXCLUDE = "exclude"
+    ONLY_FILTER = "only-filter"
+    TOO_LARGE = "too-large"
+    BUILD_OUTPUT = "build-output"
+
+
+@dataclass(frozen=True)
+class SkippedPath:
+    """A directory the scanner pruned, or a source-language file it dropped."""
+
+    path: str
+    reason: SkipReason
+    is_dir: bool
 
 
 @dataclass(frozen=True)
 class ImportRef:
+    """One import statement's target.
+
+    ``names`` lists what a Python ``from X import a, b`` brings in, so the
+    resolver can link ``a`` and ``b`` when they are submodules of ``X``.
+    Other extractors leave it empty.
+    """
+
     raw: str
     kind: str
     line: int
+    names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -87,6 +127,7 @@ class ScanResult:
     metadata_files: tuple[AuxFile, ...] = ()
     doc_files: tuple[AuxFile, ...] = ()
     asset_groups: tuple[AssetGroup, ...] = ()
+    skipped: tuple[SkippedPath, ...] = ()
 
     def __iter__(self):
         return iter(self.sources)
@@ -97,6 +138,14 @@ class ScanResult:
 
 @dataclass(frozen=True)
 class ModuleNode:
+    """One source file in the dependency graph.
+
+    ``fan_in`` counts every distinct importer; ``test_fan_in`` is the part of
+    it that comes from test files, so ``non_test_fan_in`` is what production
+    code depends on. Hubs are ranked on the latter: a module that only the
+    test suite imports is not a hub of the program.
+    """
+
     path: str
     language: str
     loc: int
@@ -106,6 +155,13 @@ class ModuleNode:
     fan_out: int = 0
     symbols: tuple[Symbol, ...] = ()
     has_main_guard: bool = False
+    is_test: bool = False
+    is_generated: bool = False
+    test_fan_in: int = 0
+
+    @property
+    def non_test_fan_in(self) -> int:
+        return self.fan_in - self.test_fan_in
 
 
 @dataclass(frozen=True)
@@ -124,6 +180,23 @@ class ExternalImport:
 
 
 @dataclass(frozen=True)
+class UnresolvedImport:
+    """An import that names a project file but did not resolve to a mapped one.
+
+    ``reason`` is why the target is missing from the map: the skip rule that
+    hid it (with ``hidden_by`` naming the skipped directory or file), or
+    ``None`` when no matching file exists at all.
+    """
+
+    source: str
+    raw: str
+    kind: str
+    line: int
+    reason: SkipReason | None = None
+    hidden_by: str | None = None
+
+
+@dataclass(frozen=True)
 class Report:
     root: Path
     files: tuple[FileNode, ...]
@@ -135,6 +208,7 @@ class Report:
     metadata_files: tuple[AuxFile, ...] = ()
     doc_files: tuple[AuxFile, ...] = ()
     asset_groups: tuple[AssetGroup, ...] = ()
+    unresolved_imports: tuple[UnresolvedImport, ...] = ()
 
     @property
     def name(self) -> str:

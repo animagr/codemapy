@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import Config, is_generated_file, is_project_metadata_file, metadata_kind
-from .models import AssetGroup, AuxFile, FileNode, ScanResult, TreeNode
+from .generated import is_generated_source
+from .models import AssetGroup, AuxFile, FileNode, ScanResult, SkippedPath, SkipReason, TreeNode
 
 try:  # pragma: no cover - exercised indirectly via which matcher is used
     import pathspec as _pathspec
@@ -58,18 +59,28 @@ DOC_EXTENSIONS = {".md", ".markdown", ".rst", ".adoc", ".txt"}
 NO_EXTENSION_GROUP = "(no extension)"
 
 
+@dataclass
+class _ScanBuckets:
+    """Mutable accumulators for one walk, frozen into a ScanResult at the end."""
+
+    sources: list[FileNode]
+    metadata: list[AuxFile]
+    docs: list[AuxFile]
+    assets: dict[str, list[int]]
+    skipped: list[SkippedPath]
+
+
 def scan_project(root: Path, config: Config) -> ScanResult:
     """Walk *root* once, pruning ignored directories, and classify every file.
 
     Files are classified as source (mapped languages), documentation, project
     metadata, or unmapped assets. Generated outputs and ignored directories
-    are skipped without descending into them.
+    are skipped without descending into them. Each pruned directory, and each
+    dropped file in a mapped source language, is recorded with its reason in
+    ``ScanResult.skipped``, so imports pointing into them can be explained.
     """
     root = root.resolve()
-    sources: list[FileNode] = []
-    metadata: list[AuxFile] = []
-    docs: list[AuxFile] = []
-    assets: dict[str, list[int]] = {}
+    buckets = _ScanBuckets(sources=[], metadata=[], docs=[], assets={}, skipped=[])
     gitignore = _new_gitignore_stack()
 
     for dirpath, dirnames, filenames in os.walk(root):
@@ -79,27 +90,34 @@ def scan_project(root: Path, config: Config) -> ScanResult:
         if ".gitignore" in filenames:
             gitignore.add(dir_rel, Path(dirpath) / ".gitignore")
 
-        dirnames[:] = sorted(
-            name
-            for name in dirnames
-            if not _dir_ignored(_join_rel(dir_rel, name), name, config, gitignore)
-        )
+        kept_dirs = []
+        for name in sorted(dirnames):
+            rel = _join_rel(dir_rel, name)
+            reason = _dir_skip_reason(Path(dirpath) / name, rel, config, gitignore)
+            if reason is None:
+                kept_dirs.append(name)
+            else:
+                buckets.skipped.append(SkippedPath(path=rel, reason=reason, is_dir=True))
+        dirnames[:] = kept_dirs
 
         for name in sorted(filenames):
             rel = _join_rel(dir_rel, name)
-            if _file_ignored(rel, name, config, gitignore):
+            reason = _file_skip_reason(rel, name, config, gitignore)
+            if reason is not None:
+                _record_skipped_source(buckets, rel, reason)
                 continue
-            _classify(Path(dirpath) / name, rel, config, sources, metadata, docs, assets)
+            _classify(Path(dirpath) / name, rel, config, buckets)
 
     asset_groups = tuple(
         AssetGroup(extension=extension, count=count, size=size)
-        for extension, (count, size) in sorted(assets.items())
+        for extension, (count, size) in sorted(buckets.assets.items())
     )
     return ScanResult(
-        sources=tuple(sorted(sources, key=lambda file: file.path)),
-        metadata_files=tuple(sorted(metadata, key=lambda item: item.path)),
-        doc_files=tuple(sorted(docs, key=lambda item: item.path)),
+        sources=tuple(sorted(buckets.sources, key=lambda file: file.path)),
+        metadata_files=tuple(sorted(buckets.metadata, key=lambda item: item.path)),
+        doc_files=tuple(sorted(buckets.docs, key=lambda item: item.path)),
         asset_groups=asset_groups,
+        skipped=tuple(sorted(buckets.skipped, key=lambda item: item.path)),
     )
 
 
@@ -121,31 +139,41 @@ def _join_rel(base: str, name: str) -> str:
     return f"{base}/{name}" if base else name
 
 
-def _dir_ignored(rel: str, name: str, config: Config, gitignore: _GitIgnoreStack) -> bool:
-    if config.is_ignored_name(name):
-        return True
+def _dir_skip_reason(
+    path: Path, rel: str, config: Config, gitignore: _GitIgnoreStack
+) -> SkipReason | None:
+    reason = config.dir_skip_reason(path)
+    if reason is not None:
+        return reason
     if gitignore.is_ignored(rel, is_dir=True):
-        return True
-    return any(pattern and pattern in rel for pattern in config.exclude)
+        return SkipReason.GITIGNORE
+    if _excluded(rel, config):
+        return SkipReason.EXCLUDE
+    return None
 
 
-def _file_ignored(rel: str, name: str, config: Config, gitignore: _GitIgnoreStack) -> bool:
-    if config.is_ignored_name(name):
-        return True
+def _file_skip_reason(rel: str, name: str, config: Config, gitignore: _GitIgnoreStack) -> SkipReason | None:
+    reason = config.name_skip_reason(name)
+    if reason is not None:
+        return reason
     if gitignore.is_ignored(rel, is_dir=False):
-        return True
+        return SkipReason.GITIGNORE
+    if _excluded(rel, config):
+        return SkipReason.EXCLUDE
+    return None
+
+
+def _excluded(rel: str, config: Config) -> bool:
     return any(pattern and pattern in rel for pattern in config.exclude)
 
 
-def _classify(
-    path: Path,
-    rel: str,
-    config: Config,
-    sources: list[FileNode],
-    metadata: list[AuxFile],
-    docs: list[AuxFile],
-    assets: dict[str, list[int]],
-) -> None:
+def _record_skipped_source(buckets: _ScanBuckets, rel: str, reason: SkipReason) -> None:
+    """Remember a dropped file if it is in a mapped language (a possible import target)."""
+    if Path(rel).suffix.lower() in LANGUAGES_BY_EXT:
+        buckets.skipped.append(SkippedPath(path=rel, reason=reason, is_dir=False))
+
+
+def _classify(path: Path, rel: str, config: Config, buckets: _ScanBuckets) -> None:
     try:
         stat = path.stat()
     except OSError:
@@ -155,24 +183,29 @@ def _classify(
     ext = path.suffix.lower()
     if is_project_metadata_file(path):
         loc = _count_loc(path) if stat.st_size <= config.max_file_bytes else 0
-        metadata.append(AuxFile(path=rel, kind=metadata_kind(name), size=stat.st_size, loc=loc))
+        buckets.metadata.append(AuxFile(path=rel, kind=metadata_kind(name), size=stat.st_size, loc=loc))
         return
     if is_generated_file(path):
+        _record_skipped_source(buckets, rel, SkipReason.BUILD_OUTPUT)
         return
 
     if ext in LANGUAGES_BY_EXT:
         if config.only and ext.lstrip(".") not in config.only:
+            _record_skipped_source(buckets, rel, SkipReason.ONLY_FILTER)
             return
         if stat.st_size > config.max_file_bytes:
+            _record_skipped_source(buckets, rel, SkipReason.TOO_LARGE)
             return
-        sources.append(
+        text = _read_text(path)
+        buckets.sources.append(
             FileNode(
                 path=rel,
                 absolute_path=path,
                 size=stat.st_size,
-                loc=_count_loc(path),
+                loc=_count_text_loc(text),
                 extension=ext,
                 language=LANGUAGES_BY_EXT[ext],
+                is_generated=is_generated_source(rel, text),
             )
         )
         return
@@ -180,10 +213,10 @@ def _classify(
     if ext in DOC_EXTENSIONS:
         if stat.st_size > config.max_file_bytes:
             return
-        docs.append(AuxFile(path=rel, kind="documentation", size=stat.st_size, loc=_count_loc(path)))
+        buckets.docs.append(AuxFile(path=rel, kind="documentation", size=stat.st_size, loc=_count_loc(path)))
         return
 
-    group = assets.setdefault(ext or NO_EXTENSION_GROUP, [0, 0])
+    group = buckets.assets.setdefault(ext or NO_EXTENSION_GROUP, [0, 0])
     group[0] += 1
     group[1] += stat.st_size
 
@@ -346,3 +379,15 @@ def _count_loc(path: Path) -> int:
         return count
     except OSError:
         return 0
+
+
+def _read_text(path: Path) -> str:
+    """Read a source file whole; universal newlines make it split like ``_count_loc``."""
+    try:
+        return path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return ""
+
+
+def _count_text_loc(text: str) -> int:
+    return sum(1 for line in text.split("\n") if line.strip())

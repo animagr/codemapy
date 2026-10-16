@@ -24,6 +24,13 @@ CSHARP_NAMESPACE_FANOUT_DIVISOR = 3
 
 JS_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".svelte")
 SVELTE_SCRIPT_EXTENSIONS = (".svelte.ts", ".svelte.js")
+TS_DECLARATION_SUFFIX = ".d.ts"
+# Emitted JS suffix -> (TypeScript source suffixes, declaration file suffix).
+TS_EMITTED_SUFFIXES = {
+    ".js": ((".ts", ".tsx"), ".d.ts"),
+    ".mjs": ((".mts", ".ts", ".tsx"), ".d.mts"),
+    ".cjs": ((".cts", ".ts", ".tsx"), ".d.cts"),
+}
 VERILOG_LANGUAGES = {"Verilog", "Verilog Header", "SystemVerilog", "SystemVerilog Header"}
 VERILOG_EXTENSIONS = (".v", ".vh", ".sv", ".svh")
 C_LANGUAGES = {"C", "C Header", "C/C++ Header", "C++", "C++ Header"}
@@ -47,21 +54,25 @@ class ImportResolver:
         self.csharp_namespaces = self._build_csharp_namespace_index(files)
         self.csharp_types = self._build_csharp_type_index(files)
         self._csharp_token_cache: dict[str, frozenset[str]] = {}
+        self.last_candidates: list[str] = []
 
     def resolve(self, source: FileNode, ref: ImportRef) -> tuple[str, ...]:
         """Resolve *ref* to zero or more internal target files.
 
         Most languages map an import to a single file; C# `using` directives
         name a namespace that several files share, so resolution is many-valued.
+        Afterwards ``last_candidates`` holds the normalized paths this call
+        tried, which explains a failed resolution (see ``codemapy.unresolved``).
         """
+        self.last_candidates = []
         if source.language == "C#":
             return self._resolve_csharp(source, ref)
+        if source.language == "Python":
+            return self._resolve_python_import(source, ref)
         target = self._resolve_single(source, ref)
         return (target,) if target else ()
 
     def _resolve_single(self, source: FileNode, ref: ImportRef) -> str | None:
-        if source.language == "Python":
-            return self._resolve_python(source, ref.raw)
         if source.language in {"JavaScript", "TypeScript", "Svelte"}:
             return self._resolve_javascript(source, ref.raw)
         if source.language in VERILOG_LANGUAGES:
@@ -121,21 +132,52 @@ class ImportResolver:
             if file.language == "C#"
         }
 
+    def _resolve_python_import(self, source: FileNode, ref: ImportRef) -> tuple[str, ...]:
+        """Resolve a Python import to the module, plus any imported submodules.
+
+        ``from pkg import sub`` runs ``pkg/__init__.py`` and then loads
+        ``pkg/sub.py``, so both are dependencies. In a namespace package (a
+        folder without ``__init__.py``) the submodule is the only file.
+        Imported names that are not submodules (functions, classes) add
+        nothing.
+        """
+        targets: list[str] = []
+        module = self._resolve_python(source, ref.raw)
+        if module:
+            targets.append(module)
+        for name in ref.names:
+            if name == "*":
+                continue
+            submodule = self._resolve_python_submodule(source, ref.raw, name)
+            if submodule and submodule != source.path and submodule not in targets:
+                targets.append(submodule)
+        return tuple(targets)
+
     def _resolve_python(self, source: FileNode, raw: str) -> str | None:
+        bases, parts = self._python_bases(source, raw)
+        candidates: list[str] = []
+        for base in bases:
+            candidates.extend(self._python_candidates(base, parts))
+        return self._first_existing(candidates)
+
+    def _resolve_python_submodule(self, source: FileNode, raw: str, name: str) -> str | None:
+        bases, parts = self._python_bases(source, raw)
+        candidates: list[str] = []
+        for base in bases:
+            package = base.joinpath(*parts)
+            candidates.append((package / f"{name}.py").as_posix())
+            candidates.append((package / name / "__init__.py").as_posix())
+        return self._first_existing(candidates)
+
+    def _python_bases(self, source: FileNode, raw: str) -> tuple[list[Path], list[str]]:
+        """The folders a Python module path is looked up from, and its dotted parts."""
         if raw.startswith("."):
             level = len(raw) - len(raw.lstrip("."))
-            remainder = raw[level:]
             base = Path(source.path).parent
             for _ in range(max(level - 1, 0)):
                 base = base.parent
-            parts = [part for part in remainder.split(".") if part]
-            return self._first_existing(self._python_candidates(base, parts))
-
-        parts = [part for part in raw.split(".") if part]
-        candidates = []
-        for source_root in self.source_roots:
-            candidates.extend(self._python_candidates(source_root, parts))
-        return self._first_existing(candidates)
+            return [base], [part for part in raw[level:].split(".") if part]
+        return list(self.source_roots), [part for part in raw.split(".") if part]
 
     def _python_candidates(self, base: Path, parts: list[str]) -> list[str]:
         joined = base.joinpath(*parts) if parts else base
@@ -156,15 +198,26 @@ class ImportResolver:
             candidates.append(base.as_posix())
             if base.suffix == ".svelte":
                 candidates.extend(f"{base.as_posix()}{ext}" for ext in (".ts", ".js"))
-            elif base.suffix in {".js", ".mjs", ".cjs"}:
-                candidates.extend(base.with_suffix(ext).as_posix() for ext in (".ts", ".tsx"))
+            elif base.suffix in TS_EMITTED_SUFFIXES:
+                # An ESM specifier names the emitted file; TypeScript maps it
+                # back to the source or to a hand-written declaration file.
+                source_ext, declaration = TS_EMITTED_SUFFIXES[base.suffix]
+                candidates.extend(base.with_suffix(ext).as_posix() for ext in source_ext)
+                candidates.append(base.with_suffix(declaration).as_posix())
             elif base.suffix == ".jsx":
                 candidates.append(base.with_suffix(".tsx").as_posix())
-        else:
+        # A dot in the last segment is not always an extension: `./app.component`
+        # names `app.component.ts`, so anything but a script suffix also gets
+        # the extension and index probes.
+        if base.suffix not in JS_EXTENSIONS:
             if base.name:
-                candidates.extend((base.with_suffix(ext).as_posix() for ext in JS_EXTENSIONS))
+                candidates.extend(f"{base.as_posix()}{ext}" for ext in JS_EXTENSIONS)
                 candidates.extend(f"{base.as_posix()}{ext}" for ext in SVELTE_SCRIPT_EXTENSIONS)
             candidates.extend((base / f"index{ext}").as_posix() for ext in JS_EXTENSIONS)
+            # TypeScript falls back to a declaration file when no source exists.
+            if base.name:
+                candidates.append(f"{base.as_posix()}{TS_DECLARATION_SUFFIX}")
+            candidates.append((base / f"index{TS_DECLARATION_SUFFIX}").as_posix())
         return self._first_existing(candidates)
 
     def _resolve_verilog(self, source: FileNode, ref: ImportRef) -> str | None:
@@ -216,16 +269,18 @@ class ImportResolver:
 
     def _resolve_rust_mod(self, source: FileNode, raw: str) -> str | None:
         source_path = Path(source.path)
-        if source_path.name in {"lib.rs", "main.rs", "mod.rs"}:
-            base = source_path.parent
-        else:
-            base = source_path.with_suffix("")
-        return self._first_existing(
-            [
-                (base / raw).with_suffix(".rs").as_posix(),
-                (base / raw / "mod.rs").as_posix(),
-            ]
-        )
+        bases = [source_path.parent]
+        if source_path.name not in {"lib.rs", "main.rs", "mod.rs"}:
+            # `foo.rs` declares its children in `foo/`. The sibling fallback
+            # covers crate roots renamed in Cargo.toml (`[lib] path =
+            # "src/tree_sitter_cli.rs"`), which declare modules beside
+            # themselves; compiling code only ever has one of the two.
+            bases.insert(0, source_path.with_suffix(""))
+        candidates: list[str] = []
+        for base in bases:
+            candidates.append((base / raw).with_suffix(".rs").as_posix())
+            candidates.append((base / raw / "mod.rs").as_posix())
+        return self._first_existing(candidates)
 
     def _resolve_rust_use(self, source: FileNode, raw: str) -> str | None:
         segments = [segment for segment in raw.split("::") if segment]
@@ -356,6 +411,7 @@ class ImportResolver:
             normalized = posixpath.normpath(candidate.replace("\\", "/"))
             if normalized.startswith("./"):
                 normalized = normalized[2:]
+            self.last_candidates.append(normalized)
             if normalized in self.paths:
                 return normalized
         return None
