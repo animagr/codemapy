@@ -70,13 +70,31 @@ py -3.14 -m codemapy <path1> <path2> <path3> --artifacts
 py -3.14 -m codemapy --root <dir> --artifacts --yes
 ```
 
+With no options, codemapy scans the project and prints a compact file tree to the terminal. It writes nothing to disk.
+
+### Options
+
+| Option | What it does |
+| --- | --- |
+| `path ...` | Project folder(s) to map. Give several to map each one in turn. If neither a path nor `--root` is given, the current directory is mapped. |
+| `--root DIR` | Map every immediate subfolder of `DIR` as its own project. Repeatable, and combines with plain paths. See [Mapping several projects](#mapping-several-projects). |
+| `--artifacts` | Write a `.codemapy/` folder into each mapped project: `report.html`, `context.json`, `summary.md`, `hubs.json`, `symbols.json`, and `manifest.json` (see [Agent Artifacts](#agent-artifacts)). If the folder already exists, codemapy asks before replacing it. Any answer other than `y`/`yes` leaves the existing folder unchanged. |
+| `--yes` | Replace an existing `.codemapy/` folder without asking. It only has an effect alongside `--artifacts`, or `--open` without `--html`. Use it in scripts and multi-project runs: without `--yes`, a run that cannot answer the prompt (no interactive input) keeps the old artifacts. |
+| `--open` | Open the HTML report in your browser when the run finishes. With `--html PATH` it opens that file. Otherwise it writes `.codemapy/` just as `--artifacts` does, then opens `.codemapy/report.html`. If you decline the rewrite prompt, the existing report is opened. |
+| `--html PATH` | Write a standalone single-file HTML report to `PATH`, outside `.codemapy/`. It works for a single project only, so it is rejected with several paths or `--root`. |
+| `--json` | Print the full report data as JSON instead of the terminal tree. When several projects are mapped, it prints one JSON array. |
+| `--check` | Report whether each project's existing `.codemapy/` artifacts are stale, without scanning or writing anything. Exit code 0 means fresh, 1 stale, 2 missing. Every option other than the paths and `--root` is ignored. |
+| `--only EXTS` | Comma-separated file extensions to include, such as `py,js,ts`. The leading dot is optional. Replaces the `only` list from `.codemap.json`. |
+| `--exclude TEXTS` | Comma-separated text to exclude: any file or folder whose relative path contains one of the entries is skipped, for example `tests/,generated`. Adds to the `exclude` list from `.codemap.json`. |
+| `-h`, `--help` | Show the option summary and exit. |
+
 ### Mapping several projects
 
 Pass several paths to map each one in turn, or `--root <dir>` to map every immediate subfolder of `<dir>` as its own project (repeat `--root` for more parents; it combines with plain paths, and duplicates are mapped once). Hidden folders and names the scanner ignores by default (`node_modules`, `build`, `venv`, ...) are skipped and listed on stderr; a `keep_dirs` entry in the root's `.codemap.json` brings one back.
 
 With more than one project, each gets a `=== [n/N] <path> ===` header, a failure in one project is reported and the rest still run (exit code 1 if any failed), `--json` prints a single JSON array, and `--check` prints one line per project and exits with the worst result. `--html` writes a single file, so it is rejected; use `--artifacts` instead. Existing `.codemapy/` folders are confirmed one by one unless `--yes` is given.
 
-`--check` reports whether existing `.codemapy` artifacts are stale without rewriting them: exit code 0 means fresh, 1 stale, 2 missing. In a git repository the check compares the commit (and dirty state) recorded in `manifest.json` against HEAD; elsewhere it falls back to comparing source file modification times.
+`--check` reports whether existing `.codemapy` artifacts are stale without rewriting them: exit code 0 means fresh, 1 stale, 2 missing. In a git repository the check compares the commit (and dirty state) recorded in `manifest.json` against HEAD; elsewhere it falls back to comparing source file modification times. codemapy's own `.codemapy/` folders never count as uncommitted changes, so the artifacts don't need to be committed or added to `.gitignore` to read as fresh.
 
 From a checkout without installing the package, add the backend dependencies first so tree-sitter
 parsing and exact gitignore matching are available (otherwise codemapy falls back to regex/`ast`

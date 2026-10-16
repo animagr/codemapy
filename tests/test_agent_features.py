@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 import tempfile
 import unittest
 import unittest.mock
 from pathlib import Path
 
+from codemapy import gitinfo
 from codemapy.artifacts import check_artifacts, report_payload, summary_markdown, symbols_payload, write_artifacts
 from codemapy.config import Config, load_config
 from codemapy.graph import build_report
@@ -22,6 +25,8 @@ try:
 except ImportError:
     PATHSPEC_AVAILABLE = False
 
+GIT_AVAILABLE = shutil.which("git") is not None
+
 
 def _write(root: Path, files: dict[str, str | bytes]) -> None:
     for rel, content in files.items():
@@ -31,6 +36,20 @@ def _write(root: Path, files: dict[str, str | bytes]) -> None:
             path.write_bytes(content)
         else:
             path.write_text(content, encoding="utf-8")
+
+
+def _git(root: Path, *args: str) -> None:
+    """Run git in *root* with a throwaway identity so commits work on any machine."""
+    identity = ("-c", "user.name=codemapy tests", "-c", "user.email=tests@example.invalid", "-c", "commit.gpgsign=false")
+    subprocess.run(["git", "-C", str(root), *identity, *args], check=True, capture_output=True)
+
+
+def _committed_repo(root: Path, files: dict[str, str | bytes]) -> None:
+    """Write *files* into *root* and commit them as a fresh repository's first commit."""
+    _write(root, files)
+    _git(root, "init", "--quiet")
+    _git(root, "add", "--all")
+    _git(root, "commit", "--quiet", "--message", "initial")
 
 
 class ClassificationTests(unittest.TestCase):
@@ -354,6 +373,62 @@ class StalenessCheckTests(unittest.TestCase):
             code, message = check_artifacts(root)
             self.assertEqual(1, code, message)
             self.assertIn("app.py", message)
+
+    @unittest.skipUnless(GIT_AVAILABLE, "git is not installed")
+    def test_check_ignores_untracked_artifacts_in_a_git_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _committed_repo(root, {"app.py": "print('hello')\n"})
+
+            write_artifacts(build_report(root, scan_project(root, Config())))
+            code, message = check_artifacts(root)
+            self.assertEqual(0, code, message)
+
+            # Rewriting while the previous .codemapy/ exists must not record a dirty tree.
+            write_artifacts(build_report(root, scan_project(root, Config())))
+            self.assertIs(False, json.loads((root / ".codemapy" / "manifest.json").read_text(encoding="utf-8"))["git_dirty"])
+            code, message = check_artifacts(root)
+            self.assertEqual(0, code, message)
+
+            _write(root, {"app.py": "print('changed')\n"})
+            code, message = check_artifacts(root)
+            self.assertEqual(1, code, message)
+            self.assertIn("uncommitted changes", message)
+
+
+class GitDirtyStateTests(unittest.TestCase):
+    @unittest.skipUnless(GIT_AVAILABLE, "git is not installed")
+    def test_ignored_dir_names_hide_untracked_artifact_folders_at_any_depth(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _committed_repo(root, {"app.py": "print('hello')\n", "pkg/mod.py": "x = 1\n"})
+            _write(root, {".codemapy/manifest.json": "{}\n", "pkg/.codemapy/summary.md": "# nested\n"})
+
+            self.assertIs(False, gitinfo.is_dirty(root, ignored_dir_names=(".codemapy",)))
+            self.assertIs(True, gitinfo.is_dirty(root))
+
+    @unittest.skipUnless(GIT_AVAILABLE, "git is not installed")
+    def test_real_changes_still_count_next_to_ignored_folders(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _committed_repo(root, {"app.py": "print('hello')\n"})
+            _write(root, {".codemapy/manifest.json": "{}\n"})
+            ignored = (".codemapy",)
+
+            _write(root, {"new.py": "x = 1\n"})
+            self.assertIs(True, gitinfo.is_dirty(root, ignored_dir_names=ignored))
+
+            (root / "new.py").unlink()
+            _write(root, {"app.py": "print('changed')\n"})
+            self.assertIs(True, gitinfo.is_dirty(root, ignored_dir_names=ignored))
+
+    def test_outside_a_repository_dirty_state_is_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(gitinfo.is_dirty(Path(tmp), ignored_dir_names=(".codemapy",)))
+
+    def test_status_parser_skips_rename_sources(self) -> None:
+        output = " M src/app.py\0R  new name.py\0old.py\0?? .codemapy/\0"
+        self.assertEqual(["src/app.py", "new name.py", ".codemapy/"], gitinfo._status_paths(output))
 
 
 class EntryPointTests(unittest.TestCase):

@@ -53,7 +53,7 @@ def write_artifacts(report: Report, output_dir: Path | None = None) -> ArtifactP
 
     generated_at = datetime.now(timezone.utc).isoformat()
     git_commit = gitinfo.head_commit(report.root)
-    git_dirty = gitinfo.is_dirty(report.root) if git_commit else None
+    git_dirty = gitinfo.is_dirty(report.root, ignored_dir_names=(ARTIFACT_DIR_NAME,)) if git_commit else None
     paths = ArtifactPaths(
         directory=directory,
         report=directory / "report.html",
@@ -98,7 +98,8 @@ def check_artifacts(root: Path) -> tuple[int, str]:
                 f"Stale: HEAD moved from {recorded_commit[:12]} to {current_commit[:12]} "
                 "(refresh with --artifacts --yes)"
             )
-        if manifest.get("git_dirty") or gitinfo.is_dirty(root):
+        # Artifacts are never committed, so their own folder is not a change.
+        if manifest.get("git_dirty") or gitinfo.is_dirty(root, ignored_dir_names=(ARTIFACT_DIR_NAME,)):
             return 1, "Stale: the working tree has uncommitted changes (refresh with --artifacts --yes)"
         return 0, f"Fresh: artifacts match clean HEAD {current_commit[:12]}"
     return _check_by_mtime(root, manifest)

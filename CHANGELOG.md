@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.9] - 2026-10-16
+
+### Fixed
+
+- `--check` reported **stale** in every git repository that does not ignore `.codemapy/`, because the untracked artifact folder itself counted as an uncommitted change. Changes under any `.codemapy/` folder are now ignored both when the dirty state is recorded in `manifest.json` and when `--check` compares it, so artifacts never need to be committed or gitignored to read as fresh. Git paths are now decoded as UTF-8 regardless of the Windows locale.
+
 ## [0.1.8] - 2026-10-12
 
 ### Added
@@ -145,6 +151,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Suppressed scanned-project Python `SyntaxWarning` messages during import extraction.
 - Fixed dependency graph resolution for nested include-style paths across supported languages.
 
+[0.1.9]: https://github.com/animagr/codemapy/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/animagr/codemapy/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/animagr/codemapy/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/animagr/codemapy/compare/v0.1.5...v0.1.6
